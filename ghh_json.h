@@ -335,12 +335,12 @@ static char *json_expect_string(json_parse_ctx_t *ctx) {
 	size_t length = 0;
 
 	while (ctx->text[ctx->index] != '\"') {
+		switch (ctx->text[ctx->index]) {
 		default:
 			json_expect_str_char(ctx);
 			++length;
 
 			break;
-		switch (ctx->text[ctx->index]) {
 		case '\n':
 		case '\0':
 			JSON_CTX_ERROR(ctx, "string ended unexpectedly.\n");
@@ -362,19 +362,19 @@ static char *json_expect_string(json_parse_ctx_t *ctx) {
 	return str;
 }
 
-static json_object_t *json_expect_object(json_parse_ctx_t *ctx);
-static json_object_t *json_expect_array(json_parse_ctx_t *ctx);
+static json_object_t *json_expect_object(json_parse_ctx_t *, json_object_t *);
+static json_object_t *json_expect_array(json_parse_ctx_t *, json_object_t *);
 
 // fills object in with value
 static void json_expect_value(json_parse_ctx_t *ctx, json_object_t *obj) {
 	switch (ctx->text[ctx->index]) {
 	case '{':
-		obj->data.objects = json_expect_object(ctx);
+		json_expect_object(ctx, obj);
 		obj->type = JSON_OBJECT;
 
 		break;
 	case '[':
-		obj->data.objects = json_expect_array(ctx);
+		json_expect_array(ctx, obj);
 		obj->type = JSON_ARRAY;
 
 		break;
@@ -403,11 +403,18 @@ static void json_expect_value(json_parse_ctx_t *ctx, json_object_t *obj) {
 	}
 }
 
-static json_object_t *json_expect_array(json_parse_ctx_t *ctx) {
+static json_object_t *json_object_create(json_parse_ctx_t *ctx) {
 	json_object_t *obj = json_alloc(ctx->json, sizeof(*obj));
-	json_object_t **tail = &obj->data.objects;
 
-	obj->data.objects = NULL;
+	obj->next = obj->data.objects = NULL;
+
+	return obj;
+}
+
+static json_object_t *json_expect_array(
+	json_parse_ctx_t *ctx, json_object_t *obj
+) {
+	json_object_t **tail = &obj->data.objects;
 
 	++ctx->index; // skip '['
 
@@ -440,11 +447,10 @@ static json_object_t *json_expect_array(json_parse_ctx_t *ctx) {
 	return obj;
 }
 
-static json_object_t *json_expect_object(json_parse_ctx_t *ctx) {
-	json_object_t *obj = json_alloc(ctx->json, sizeof(*obj));
+static json_object_t *json_expect_object(
+	json_parse_ctx_t *ctx, json_object_t *obj
+) {
 	json_object_t **tail = &obj->data.objects;
-
-	obj->data.objects = NULL;
 
 	++ctx->index; // skip '{'
 
@@ -493,15 +499,20 @@ static void json_parse(json_t *json, const char *text) {
 
 	switch (ctx.text[ctx.index]) {
 	case '{':
-		json->root = json_expect_object(&ctx);
+		json->root = json_object_create(&ctx);
+		json_expect_object(&ctx, json->root);
 		json->root->type = JSON_OBJECT;
+
 		break;
 	case '[':
-		json->root = json_expect_array(&ctx);
+		json->root = json_object_create(&ctx);
+		json_expect_array(&ctx, json->root);
 		json->root->type = JSON_ARRAY;
+
 		break;
 	case '\0': // empty json is still valid json
 		json->root = NULL;
+
 		break;
 	default:
 		JSON_CTX_ERROR(&ctx, "invalid json root.\n");
@@ -536,7 +547,7 @@ static void json_print_lower(json_object_t *obj, int level) {
 
 			break;
 		default:
-			printf("UNHANDLED VALUE\n");
+			printf("%%UNHANDLED%%\n");
 			break;
 		}
 	}
