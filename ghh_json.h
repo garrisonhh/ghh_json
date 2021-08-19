@@ -1,7 +1,6 @@
 #ifndef GHH_JSON_H
 #define GHH_JSON_H
 
-// Copyright (c) 2021 garrisonhh
 // licensing info at end of file.
 
 #include <stddef.h>
