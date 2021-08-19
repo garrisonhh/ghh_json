@@ -251,6 +251,17 @@ void json_load_file(json_t *json, const char *filepath) {
 
 // parsing ====================================================================
 
+// for mapping escape sequences
+#define JSON_ESCAPE_CHARACTERS_X\
+	X('"', '\"')\
+	X('\\', '\\')\
+	X('/', '/')\
+	X('b', '\b')\
+	X('f', '\f')\
+	X('n', '\n')\
+	X('r', '\r')\
+	X('t', '\t')
+
 static bool json_is_whitespace(char ch) {
 	switch (ch) {
 	case 0x20:
@@ -306,16 +317,9 @@ static char json_expect_str_char(json_ctx_t *ctx) {
 		char ch;
 
 		switch (ctx->text[++ctx->index]) {
-#define ESC_CASE(a, b) case a: ch = b; break
-		ESC_CASE('"', '\"');
-		ESC_CASE('\\', '\\');
-		ESC_CASE('/', '/');
-		ESC_CASE('b', '\b');
-		ESC_CASE('f', '\f');
-		ESC_CASE('n', '\n');
-		ESC_CASE('r', '\r');
-		ESC_CASE('t', '\t');
-#undef ESC_CASE
+#define X(a, b) case a: ch = b; break;
+		JSON_ESCAPE_CHARACTERS_X
+#undef X
 		case 'u':
 			JSON_CTX_ERROR(
 				ctx,
@@ -595,6 +599,26 @@ static void json_fprint_level(FILE *file, int level) {
 	fprintf(file, "%*s", level << 2, "");
 }
 
+// handles escape characters
+static void json_fprint_string(FILE *file, char *str) {
+	fprintf(file, "\"");
+
+	while (*str) {
+		switch (*str) {
+#define X(a, b) case b: fprintf(file, "\\%c", a); break;
+		JSON_ESCAPE_CHARACTERS_X
+#undef X
+		default:
+			fprintf(file, "%c", *str);
+			break;
+		}
+
+		++str;
+	}
+
+	fprintf(file, "\"");
+}
+
 static void json_fprint_lower(FILE *file, json_object_t *obj, int level) {
 	// print start of collection
 	fprintf(file, obj->type == JSON_OBJECT ? "{\n" : "[\n");
@@ -615,7 +639,7 @@ static void json_fprint_lower(FILE *file, json_object_t *obj, int level) {
 
 			break;
 		case JSON_STRING:
-			fprintf(file, "\"%s\"", trav->data.string);
+			json_fprint_string(file, trav->data.string);
 
 			break;
 		case JSON_NUMBER:
