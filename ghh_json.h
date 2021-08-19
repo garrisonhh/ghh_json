@@ -193,6 +193,8 @@ static void *json_alloc(json_t *json, size_t size) {
 	// allocate new page when needed
 	if (json->used + size > JSON_PAGE_SIZE) {
 		if (size >= JSON_PAGE_SIZE) {
+			JSON_DEBUG("allocating custom page and new page.\n");
+
 			// size too big for pages, give this pointer its own page
 			json->pages[++json->cur_page] = JSON_MALLOC(size);
 
@@ -203,6 +205,8 @@ static void *json_alloc(json_t *json, size_t size) {
 
 			return ptr;
 		} else {
+			JSON_DEBUG("allocating new page.\n");
+
 			// allocate new page
 			if (++json->cur_page == json->page_cap) {
 				json->page_cap <<= 1;
@@ -827,6 +831,7 @@ static void json_fprint_level(FILE *file, int level) {
 }
 
 // handles escape characters
+// TODO json_escape_string?
 static void json_fprint_string(FILE *file, char *str) {
 	fprintf(file, "\"");
 

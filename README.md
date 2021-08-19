@@ -57,6 +57,21 @@ there are only 3 types you need to think about:
 
 ## api
 
+### settings
+
+```c
+// define your own allocation functions
+#define JSON_MALLOC(size)
+#define JSON_FREE(size)
+
+// change the size of the char buffer for fread().
+#define JSON_FREAD_BUF_SIZE
+
+// the json_t allocator works by allocating pages to accommodate objects and
+// data. increasing this means less allocations during parsing.
+#define JSON_PAGE_SIZE
+```
+
 ### json_t lifetime
 
 ```c
