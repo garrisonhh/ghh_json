@@ -1,6 +1,10 @@
 #ifndef GHH_JSON_H
 #define GHH_JSON_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // licensing info at end of file.
 
 #include <stddef.h>
@@ -162,7 +166,7 @@ static void json_contextual_error(json_ctx_t *ctx) {
 // and JSON_FREE. this is useful for allocating things that aren't on a json_t
 // allocator
 static void *json_fat_alloc(size_t size) {
-	size_t *ptr = JSON_MALLOC(sizeof(*ptr) + size);
+	size_t *ptr = (size_t *)JSON_MALLOC(sizeof(*ptr) + size);
 
 	*ptr = size;
 
@@ -196,11 +200,11 @@ static void *json_alloc(json_t *json, size_t size) {
 			JSON_DEBUG("allocating custom page and new page.\n");
 
 			// size too big for pages, give this pointer its own page
-			json->pages[++json->cur_page] = JSON_MALLOC(size);
+			json->pages[++json->cur_page] = (char *)JSON_MALLOC(size);
 
 			void *ptr = json->pages[json->cur_page];
 
-			json->pages[++json->cur_page] = JSON_MALLOC(JSON_PAGE_SIZE);
+			json->pages[++json->cur_page] = (char *)JSON_MALLOC(JSON_PAGE_SIZE);
 			json->used = 0;
 
 			return ptr;
@@ -210,13 +214,13 @@ static void *json_alloc(json_t *json, size_t size) {
 			// allocate new page
 			if (++json->cur_page == json->page_cap) {
 				json->page_cap <<= 1;
-				json->pages = json_fat_realloc(
+				json->pages = (char **)json_fat_realloc(
 					json->pages,
 					json->page_cap * sizeof(*json->pages)
 				);
 			}
 
-			json->pages[json->cur_page] = JSON_MALLOC(JSON_PAGE_SIZE);
+			json->pages[json->cur_page] = (char *)JSON_MALLOC(JSON_PAGE_SIZE);
 			json->used = 0;
 		}
 	}
@@ -233,11 +237,13 @@ static void *json_alloc(json_t *json, size_t size) {
 static void json_make(json_t *json) {
 	*json = (json_t){
 		.root = NULL,
-		.page_cap = JSON_INIT_PAGE_CAP,
-		.pages = json_fat_alloc(JSON_INIT_PAGE_CAP * sizeof(*json->pages))
+		.pages = (char **)json_fat_alloc(
+			JSON_INIT_PAGE_CAP * sizeof(*json->pages)
+		),
+		.page_cap = JSON_INIT_PAGE_CAP
 	};
 
-	json->pages[0] = JSON_MALLOC(JSON_PAGE_SIZE);
+	json->pages[0] = (char *)JSON_MALLOC(JSON_PAGE_SIZE);
 }
 
 static void json_parse(json_t *json, const char *text);
@@ -265,7 +271,7 @@ void json_load_file(json_t *json, const char *filepath) {
 
     // read text through buffer
     char *text = NULL;
-    char *buffer = JSON_MALLOC(JSON_FREAD_BUF_SIZE);
+    char *buffer = (char *)JSON_MALLOC(JSON_FREAD_BUF_SIZE);
     size_t text_len = 0;
     bool done = false;
 
@@ -286,7 +292,7 @@ void json_load_file(json_t *json, const char *filepath) {
         size_t last_len = text_len;
 
         text_len += num_read;
-        text = json_fat_realloc(text, text_len);
+        text = (char *)json_fat_realloc(text, text_len);
 
         memcpy(text + last_len, buffer, num_read * sizeof(*buffer));
     } while (!done);
@@ -358,7 +364,7 @@ static void json_list_make(json_list_t *list) {
 static void json_list_push(
 	json_ctx_t *ctx, json_list_t *list, char *key, struct json_object *object
 ) {
-	json_lnode_t *lnode = json_alloc(ctx->json, sizeof(*lnode));
+	json_lnode_t *lnode = (json_lnode_t *)json_alloc(ctx->json, sizeof(*lnode));
 
 	lnode->key = key;
 	lnode->object = object;
@@ -400,7 +406,7 @@ static struct json_object *json_hmap_get(json_hmap_t *hmap, char *key) {
 static void json_hmap_put(
 	json_ctx_t *ctx, json_hmap_t *hmap, char *key, struct json_object *object
 ) {
-	json_hnode_t *node = json_alloc(ctx->json, sizeof(*node));
+	json_hnode_t *node = (json_hnode_t *)json_alloc(ctx->json, sizeof(*node));
 
 	node->hash = json_hash_str(key);
 	node->object = object;
@@ -416,11 +422,11 @@ static void json_hmap_put(
 
 static json_array_t *json_gen_array(json_ctx_t *ctx, json_list_t *list) {
 	// create array
-	json_array_t *array = json_alloc(ctx->json, sizeof(*array));
+	json_array_t *array = (json_array_t *)json_alloc(ctx->json, sizeof(*array));
 
 	array->list_root = list->root;
 	array->size = list->size;
-	array->objects = json_alloc(
+	array->objects = (json_object_t **)json_alloc(
 		ctx->json,
 		array->size * sizeof(*array->objects)
 	);
@@ -438,12 +444,12 @@ static json_array_t *json_gen_array(json_ctx_t *ctx, json_list_t *list) {
 
 static json_hmap_t *json_gen_hmap(json_ctx_t *ctx, json_list_t *list) {
 	// create hmap
-	json_hmap_t *hmap = json_alloc(ctx->json, sizeof(*hmap));
+	json_hmap_t *hmap = (json_hmap_t *)json_alloc(ctx->json, sizeof(*hmap));
 
 	hmap->list_root = list->root;
 	hmap->size = list->size;
 	hmap->num_nodes = hmap->size << 1;
-	hmap->nodes = json_alloc(
+	hmap->nodes = (json_hnode_t **)json_alloc(
 		ctx->json,
 		hmap->num_nodes * sizeof(*hmap->nodes)
 	);
@@ -579,7 +585,7 @@ static char *json_expect_string(json_ctx_t *ctx) {
 	}
 
 	// read string
-	char *str = json_alloc(ctx->json, (length + 1) * sizeof(*str));
+	char *str = (char *)json_alloc(ctx->json, (length + 1) * sizeof(*str));
 
 	ctx->index = start_index;
 
@@ -726,7 +732,10 @@ static json_object_t *json_expect_array(
 	// parse key/value pairs
 	while (1) {
 		// get child and store
-		json_object_t *child = json_alloc(ctx->json, sizeof(*object));
+		json_object_t *child = (json_object_t *)json_alloc(
+			ctx->json,
+			sizeof(*object)
+		);
 
 		json_next_token(ctx);
 		json_expect_value(ctx, child);
@@ -758,7 +767,10 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
 	// parse key/value pairs
 	while (1) {
 		// get pair and store
-		json_object_t *child = json_alloc(ctx->json, sizeof(*object));
+		json_object_t *child = (json_object_t *)json_alloc(
+			ctx->json,
+			sizeof(*object)
+		);
 
 		json_next_token(ctx);
 		char *key = json_expect_string(ctx);
@@ -798,7 +810,7 @@ static void json_parse(json_t *json, const char *text) {
 
 	switch (ctx.text[ctx.index]) {
 	case '{':
-		json->root = json_alloc(ctx.json, sizeof(*json->root));
+		json->root = (json_object_t *)json_alloc(ctx.json, sizeof(*json->root));
 		json_expect_obj(&ctx, json->root);
 		json->root->type = JSON_OBJECT;
 
@@ -807,7 +819,7 @@ static void json_parse(json_t *json, const char *text) {
 
 		break;
 	case '[':
-		json->root = json_alloc(ctx.json, sizeof(*json->root));
+		json->root = (json_object_t *)json_alloc(ctx.json, sizeof(*json->root));
 		json_expect_array(&ctx, json->root);
 		json->root->type = JSON_ARRAY;
 
@@ -1022,6 +1034,11 @@ bool json_to_bool(json_object_t *object) {
 }
 
 #endif // GHH_JSON_IMPL
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif // GHH_JSON_H
 
 /*

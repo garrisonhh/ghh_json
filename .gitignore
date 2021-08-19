@@ -3,6 +3,7 @@ example*.json
 generated.json
 test
 test.c
+test.cpp
 *.py
 massif*
 vgcore*
