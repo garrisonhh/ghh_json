@@ -1,4 +1,5 @@
 Makefile
-example.json
+example*.json
+generated.json
 test
 test.c
