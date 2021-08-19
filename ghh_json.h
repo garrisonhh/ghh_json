@@ -235,13 +235,13 @@ static void *json_alloc(json_t *json, size_t size) {
 
 // internal json_t initializer
 static void json_make(json_t *json) {
-	*json = (json_t){
-		.root = NULL,
-		.pages = (char **)json_fat_alloc(
-			JSON_INIT_PAGE_CAP * sizeof(*json->pages)
-		),
-		.page_cap = JSON_INIT_PAGE_CAP
-	};
+	// no ZII in cpp :(
+	json->root = NULL;
+	json->cur_page = json->used = 0;
+	json->page_cap = JSON_INIT_PAGE_CAP;
+	json->pages = (char **)json_fat_alloc(
+		JSON_INIT_PAGE_CAP * sizeof(*json->pages)
+	);
 
 	json->pages[0] = (char *)JSON_MALLOC(JSON_PAGE_SIZE);
 }
@@ -799,11 +799,11 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
 }
 
 static void json_parse(json_t *json, const char *text) {
-	json_ctx_t ctx = {
-		.json = json,
-		.text = text,
-		.index = 0
-	};
+	json_ctx_t ctx;
+
+	ctx.json = json;
+	ctx.text = text;
+	ctx.index = 0;
 
 	// recursive parse at root
 	json_next_token(&ctx);

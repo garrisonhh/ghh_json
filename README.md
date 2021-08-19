@@ -1,6 +1,6 @@
 # ghh_json.h
 
-a single-header ISO-C99 json loader.
+a single-header ISO-C99 (and C++ compatible) json loader.
 
 ## why?
 
