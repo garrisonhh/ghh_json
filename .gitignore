@@ -3,3 +3,8 @@ example*.json
 generated.json
 test
 test.c
+*.py
+massif*
+vgcore*
+callgrind*
+cachegrind*
