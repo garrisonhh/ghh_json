@@ -24,7 +24,7 @@ typedef enum json_type {
 typedef struct json_object {
 	union json_obj_data {
 		struct json_hmap *hmap;
-		struct json_array *array;
+		struct json_vec *vec;
 		char *string;
 		double number;
 	} data;
@@ -35,8 +35,8 @@ typedef struct json_object {
 typedef struct json {
 	json_object_t *root;
 
-	// allocator
-	char **pages;
+	// page allocator
+	char **pages; // fat ptr
 	size_t cur_page, page_cap; // tracks allocator pages
 	size_t used; // tracks current page stack
 } json_t;
@@ -168,9 +168,9 @@ static void json_contextual_error(json_ctx_t *ctx) {
 static void *json_fat_alloc(size_t size) {
 	size_t *ptr = (size_t *)JSON_MALLOC(sizeof(*ptr) + size);
 
-	*ptr = size;
+	*ptr++ = size;
 
-	return (void *)(ptr + 1);
+	return ptr;
 }
 
 static inline void json_fat_free(void *ptr) {
@@ -192,8 +192,8 @@ static void *json_fat_realloc(void *ptr, size_t size) {
 	return new_ptr;
 }
 
-// allocates on a json_t stack
-static void *json_alloc(json_t *json, size_t size) {
+// allocates on a json_t page
+static void *json_page_alloc(json_t *json, size_t size) {
 	// allocate new page when needed
 	if (json->used + size > JSON_PAGE_SIZE) {
 		if (size >= JSON_PAGE_SIZE) {
@@ -233,84 +233,63 @@ static void *json_alloc(json_t *json, size_t size) {
 	return ptr;
 }
 
-// internal json_t initializer
-static void json_make(json_t *json) {
-	// no ZII in cpp :(
-	json->root = NULL;
-	json->cur_page = json->used = 0;
-	json->page_cap = JSON_INIT_PAGE_CAP;
-	json->pages = (char **)json_fat_alloc(
-		JSON_INIT_PAGE_CAP * sizeof(*json->pages)
-	);
+// array (vector) ==============================================================
 
-	json->pages[0] = (char *)JSON_MALLOC(JSON_PAGE_SIZE);
-}
+typedef struct json_vec {
+    void **data; // fat ptr
+    size_t size, cap, min_cap;
+} json_vec_t;
 
-static void json_parse(json_t *json, const char *text);
-
-void json_load(json_t *json, char *text) {
-	json_make(json);
-	json_parse(json, text);
-}
-
-void json_unload(json_t *json) {
-	for (size_t i = 0; i <= json->cur_page; ++i)
-		JSON_FREE(json->pages[i]);
-
-	json_fat_free(json->pages);
-}
-
-void json_load_file(json_t *json, const char *filepath) {
-	JSON_DEBUG("reading\n");
-
-    // open and check for existance
-    FILE *file = fopen(filepath, "r");
-
-    if (!file)
-        JSON_ERROR("could not open file: \"%s\"\n", filepath);
-
-    // read text through buffer
-    char *text = NULL;
-    char *buffer = (char *)JSON_MALLOC(JSON_FREAD_BUF_SIZE);
-    size_t text_len = 0;
-    bool done = false;
-
-    do {
-        size_t num_read = fread(
-			buffer,
-			sizeof(*buffer),
-			JSON_FREAD_BUF_SIZE,
-			file
+static void json_vec_alloc_one(json_vec_t *vec) {
+    if (vec->size + 1 > vec->cap) {
+        vec->cap <<= 1;
+        vec->data = (void **)json_fat_realloc(
+			vec->data,
+			vec->cap * sizeof(*vec->data)
 		);
-
-        if (num_read != JSON_FREAD_BUF_SIZE) {
-            done = true;
-            ++num_read;
-        }
-
-        // copy buffer into doc->text
-        size_t last_len = text_len;
-
-        text_len += num_read;
-        text = (char *)json_fat_realloc(text, text_len);
-
-        memcpy(text + last_len, buffer, num_read * sizeof(*buffer));
-    } while (!done);
-
-    text[text_len - 1] = '\0';
-
-	free(buffer);
-
-	// load and cleanup
-	JSON_DEBUG("loading\n");
-
-	json_load(json, text);
-
-	json_fat_free(text);
-    fclose(file);
+    }
 }
 
-// data structures =============================================================
+static void json_vec_free_one(json_vec_t *vec) {
+	JSON_ASSERT(vec->size, "popped from vec of size zero.\n");
+
+    if (vec->cap > vec->min_cap && vec->size < vec->cap >> 2) {
+        vec->cap >>= 1;
+        vec->data = (void **)json_fat_realloc(
+			vec->data,
+			vec->cap * sizeof(*vec->data)
+		);
+    }
+}
+
+static void json_vec_make(json_vec_t *vec, size_t init_cap) {
+    vec->size = 0;
+    vec->min_cap = vec->cap = init_cap;
+
+    vec->data = (void **)json_fat_alloc(
+		vec->cap * sizeof(*vec->data)
+	);
+}
+
+static void json_vec_push(json_vec_t *vec, void *item) {
+    json_vec_alloc_one(vec);
+    vec->data[vec->size++] = item;
+}
+
+static void *json_vec_pop(json_vec_t *vec) {
+    json_object_t *item = (json_object_t *)vec->data[vec->size - 1];
+
+    json_vec_free_one(vec);
+    --vec->size;
+
+    return item;
+}
+
+static inline void *json_vec_peek(json_vec_t *vec) {
+	return vec->data[vec->size - 1];
+}
+
+// hashmap =====================================================================
 
 #if INTPTR_MAX == INT64_MAX
 // 64 bit
@@ -324,61 +303,17 @@ typedef uint32_t json_hash_t;
 #define JSON_FNV_BASIS 0x0811c9dc5
 #endif
 
-typedef struct json_lnode {
-	struct json_lnode *next;
-	struct json_object *object;
-	char *key;
-} json_lnode_t;
-
-typedef struct json_list {
-	json_lnode_t *root;
-	json_lnode_t *tip;
-	size_t size;
-} json_list_t;
-
 typedef struct json_hnode {
-	struct json_hnode *next;
-	struct json_object *object;
-	json_hash_t hash;
+    json_object_t *object;
+    json_hash_t hash;
+    size_t index, steps;
 } json_hnode_t;
 
 typedef struct json_hmap {
-	json_lnode_t *list_root;
-
-	json_hnode_t **nodes;
-	size_t size, num_nodes;
+	json_vec_t vec; // stores keys in order
+    json_hnode_t *nodes; // fat ptr
+    size_t size, cap, min_cap;
 } json_hmap_t;
-
-typedef struct json_array {
-	json_lnode_t *list_root;
-
-	struct json_object **objects;
-	size_t size;
-} json_array_t;
-
-static void json_list_make(json_list_t *list) {
-	list->root = list->tip = NULL;
-	list->size = 0;
-}
-
-static void json_list_push(
-	json_ctx_t *ctx, json_list_t *list, char *key, struct json_object *object
-) {
-	json_lnode_t *lnode = (json_lnode_t *)json_alloc(ctx->json, sizeof(*lnode));
-
-	lnode->key = key;
-	lnode->object = object;
-	lnode->next = NULL;
-
-	if (list->root) {
-		list->tip->next = lnode;
-		list->tip = lnode;
-	} else {
-		list->root = list->tip = lnode;
-	}
-
-	++list->size;
-}
 
 // fnv-1a hash function (http://isthe.com/chongo/tech/comp/fnv/)
 static json_hash_t json_hash_str(char *str) {
@@ -390,82 +325,109 @@ static json_hash_t json_hash_str(char *str) {
     return hash;
 }
 
-static struct json_object *json_hmap_get(json_hmap_t *hmap, char *key) {
-	json_hash_t hash = json_hash_str(key);
-	size_t index = hash % hmap->num_nodes;
+static json_hnode_t *json_hnodes_alloc(size_t num_nodes) {
+	json_hnode_t *nodes = (json_hnode_t *)json_fat_alloc(
+		num_nodes * sizeof(json_hnode_t)
+	);
 
-	for (json_hnode_t *trav = hmap->nodes[index]; trav; trav = trav->next)
-		if (trav->hash == hash)
-			return trav->object;
+	for (size_t i = 0; i < num_nodes; ++i)
+		nodes[i].hash = 0;
+
+	return nodes;
+}
+
+static void json_hmap_put_node(json_hmap_t *, json_hnode_t *);
+
+static void json_hmap_rehash(json_hmap_t *hmap, size_t new_cap) {
+    json_hnode_t *old_nodes = hmap->nodes;
+    size_t old_cap = hmap->cap;
+
+    hmap->cap = new_cap;
+    hmap->nodes = json_hnodes_alloc(hmap->cap);
+    hmap->size = 0;
+
+    for (size_t i = 0; i < old_cap; ++i) {
+        if (old_nodes[i].hash) {
+            old_nodes[i].index = old_nodes[i].hash % hmap->cap;
+            old_nodes[i].steps = 0;
+
+            json_hmap_put_node(hmap, &old_nodes[i]);
+        }
+    }
+
+    json_fat_free(old_nodes);
+}
+
+static inline void json_hmap_alloc_slot(json_hmap_t *hmap) {
+    if (++hmap->size > hmap->cap >> 1)
+        json_hmap_rehash(hmap, hmap->cap << 1);
+}
+
+static inline void json_hmap_free_slot(json_hmap_t *hmap) {
+    if (hmap->size-- < hmap->cap >> 2 && hmap->cap > hmap->min_cap)
+        json_hmap_rehash(hmap, hmap->cap >> 1);
+}
+
+static void json_hmap_make(json_hmap_t *hmap, size_t init_cap) {
+	json_vec_make(&hmap->vec, init_cap);
+
+    hmap->size = 0;
+    hmap->cap = hmap->min_cap = init_cap;
+    hmap->nodes = json_hnodes_alloc(hmap->cap);
+}
+
+// for rehash + put
+static void json_hmap_put_node(json_hmap_t *hmap, json_hnode_t *node) {
+    size_t index = node->index;
+
+    // find suitable bucket
+    while (hmap->nodes[index].hash) {
+        if (hmap->nodes[index].hash == node->hash) {
+            // found matching bucket
+            hmap->nodes[index].object = node->object;
+            return;
+        }
+
+        index = (index + 1) % hmap->cap;
+        ++node->steps;
+    }
+
+    // found empty bucket
+    hmap->nodes[index] = *node;
+
+    json_hmap_alloc_slot(hmap);
+}
+
+static json_hnode_t *json_hmap_get_node(json_hmap_t *hmap, json_hash_t hash) {
+	size_t index = hash % hmap->cap;
+
+	// iterate through hash chain until match or empty node is found
+	while (hmap->nodes[index].hash) {
+		if (hmap->nodes[index].hash == hash)
+			return &hmap->nodes[index];
+
+		index = (index + 1) % hmap->cap;
+	}
 
 	return NULL;
 }
 
-// because json doesn't specify behavior for repeated keys, put doesn't handle
-// repeated keys
-static void json_hmap_put(
-	json_ctx_t *ctx, json_hmap_t *hmap, char *key, struct json_object *object
-) {
-	json_hnode_t *node = (json_hnode_t *)json_alloc(ctx->json, sizeof(*node));
+static void json_hmap_put(json_hmap_t *hmap, char *key, json_object_t *object) {
+	json_hnode_t node;
 
-	node->hash = json_hash_str(key);
-	node->object = object;
-	node->next = NULL;
+	json_vec_push(&hmap->vec, key);
 
-	json_hnode_t **trav = &hmap->nodes[node->hash % hmap->num_nodes];
+	node.object = object;
+	node.hash = json_hash_str(key);
+	node.index = node.hash % hmap->cap;
 
-	while (*trav)
-		trav = &(*trav)->next;
-
-	*trav = node;
+	json_hmap_put_node(hmap, &node);
 }
 
-static json_array_t *json_gen_array(json_ctx_t *ctx, json_list_t *list) {
-	// create array
-	json_array_t *array = (json_array_t *)json_alloc(ctx->json, sizeof(*array));
+static json_object_t *json_hmap_get(json_hmap_t *hmap, char *key) {
+	json_hnode_t *node = json_hmap_get_node(hmap, json_hash_str(key));
 
-	array->list_root = list->root;
-	array->size = list->size;
-	array->objects = (json_object_t **)json_alloc(
-		ctx->json,
-		array->size * sizeof(*array->objects)
-	);
-
-	// grab list data
-	json_lnode_t *trav = list->root;
-
-	for (size_t i = 0; i < array->size; ++i) {
-		array->objects[i] = trav->object;
-		trav = trav->next;
-	}
-
-	return array;
-}
-
-static json_hmap_t *json_gen_hmap(json_ctx_t *ctx, json_list_t *list) {
-	// create hmap
-	json_hmap_t *hmap = (json_hmap_t *)json_alloc(ctx->json, sizeof(*hmap));
-
-	hmap->list_root = list->root;
-	hmap->size = list->size;
-	hmap->num_nodes = hmap->size << 1;
-	hmap->nodes = (json_hnode_t **)json_alloc(
-		ctx->json,
-		hmap->num_nodes * sizeof(*hmap->nodes)
-	);
-
-	for (size_t i = 0; i < hmap->num_nodes; ++i)
-		hmap->nodes[i] = NULL;
-
-	// grab list data
-	json_lnode_t *trav = list->root;
-
-	while (trav) {
-		json_hmap_put(ctx, hmap, trav->key, trav->object);
-		trav = trav->next;
-	}
-
-	return hmap;
+    return node ? node->object : NULL;
 }
 
 // parsing =====================================================================
@@ -585,7 +547,7 @@ static char *json_expect_string(json_ctx_t *ctx) {
 	}
 
 	// read string
-	char *str = (char *)json_alloc(ctx->json, (length + 1) * sizeof(*str));
+	char *str = (char *)json_page_alloc(ctx->json, (length + 1) * sizeof(*str));
 
 	ctx->index = start_index;
 
@@ -656,8 +618,6 @@ static double json_expect_number(json_ctx_t *ctx) {
 			exponent += ctx->text[ctx->index++] - '0';
 		}
 
-		printf("exponent %ld\n", exponent);
-
 		// calculate
 		if (neg_exp) {
 			while (exponent--)
@@ -724,23 +684,25 @@ static void json_expect_value(json_ctx_t *ctx, json_object_t *object) {
 static json_object_t *json_expect_array(
 	json_ctx_t *ctx, json_object_t *object
 ) {
-	json_list_t list;
-	json_list_make(&list);
+	json_vec_t *vec = (json_vec_t *)json_page_alloc(ctx->json, sizeof(*vec));
+	json_vec_make(vec, 8);
+
+	object->data.vec = vec;
 
 	++ctx->index; // skip '['
 
 	// parse key/value pairs
 	while (1) {
 		// get child and store
-		json_object_t *child = (json_object_t *)json_alloc(
+		json_object_t *child = (json_object_t *)json_page_alloc(
 			ctx->json,
-			sizeof(*object)
+			sizeof(*child)
 		);
 
 		json_next_token(ctx);
 		json_expect_value(ctx, child);
 
-		json_list_push(ctx, &list, NULL, child);
+		json_vec_push(vec, child);
 
 		// iterate
 		json_next_token(ctx);
@@ -753,21 +715,24 @@ static json_object_t *json_expect_array(
 		json_expect_token(ctx, ",", 1);
 	}
 
-	object->data.array = json_gen_array(ctx, &list);
-
 	return object;
 }
 
 static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
-	json_list_t list;
-	json_list_make(&list);
+	json_hmap_t *hmap = (json_hmap_t *)json_page_alloc(
+		ctx->json,
+		sizeof(*hmap)
+	);
+	json_hmap_make(hmap, 8);
+
+	object->data.hmap = hmap;
 
 	++ctx->index; // skip '{'
 
 	// parse key/value pairs
 	while (1) {
 		// get pair and store
-		json_object_t *child = (json_object_t *)json_alloc(
+		json_object_t *child = (json_object_t *)json_page_alloc(
 			ctx->json,
 			sizeof(*object)
 		);
@@ -780,7 +745,7 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
 		json_next_token(ctx);
 		json_expect_value(ctx, child);
 
-		json_list_push(ctx, &list, key, child);
+		json_hmap_put(hmap, key, child);
 
 		// iterate
 		json_next_token(ctx);
@@ -792,8 +757,6 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
 
 		json_expect_token(ctx, ",", 1);
 	}
-
-	object->data.hmap = json_gen_hmap(ctx, &list);
 
 	return object;
 }
@@ -810,7 +773,11 @@ static void json_parse(json_t *json, const char *text) {
 
 	switch (ctx.text[ctx.index]) {
 	case '{':
-		json->root = (json_object_t *)json_alloc(ctx.json, sizeof(*json->root));
+		json->root = (json_object_t *)json_page_alloc(
+			ctx.json,
+			sizeof(*json->root)
+		);
+
 		json_expect_obj(&ctx, json->root);
 		json->root->type = JSON_OBJECT;
 
@@ -819,7 +786,11 @@ static void json_parse(json_t *json, const char *text) {
 
 		break;
 	case '[':
-		json->root = (json_object_t *)json_alloc(ctx.json, sizeof(*json->root));
+		json->root = (json_object_t *)json_page_alloc(
+			ctx.json,
+			sizeof(*json->root)
+		);
+
 		json_expect_array(&ctx, json->root);
 		json->root->type = JSON_ARRAY;
 
@@ -836,7 +807,130 @@ static void json_parse(json_t *json, const char *text) {
 	}
 }
 
-// print =======================================================================
+// lifetime api ================================================================
+
+// internal json_t initializer
+static void json_make(json_t *json) {
+	// no ZII in cpp :(
+	json->root = NULL;
+
+	json->cur_page = json->used = 0;
+	json->page_cap = JSON_INIT_PAGE_CAP;
+	json->pages = (char **)json_fat_alloc(
+		JSON_INIT_PAGE_CAP * sizeof(*json->pages)
+	);
+
+	json->pages[0] = (char *)JSON_MALLOC(JSON_PAGE_SIZE);
+}
+
+static void json_parse(json_t *json, const char *text);
+
+void json_load(json_t *json, char *text) {
+	json_make(json);
+	json_parse(json, text);
+}
+
+void json_load_file(json_t *json, const char *filepath) {
+	JSON_DEBUG("reading\n");
+
+    // open and check for existance
+    FILE *file = fopen(filepath, "r");
+
+    if (!file)
+        JSON_ERROR("could not open file: \"%s\"\n", filepath);
+
+    // read text through buffer
+    char *text = NULL;
+    char *buffer = (char *)JSON_MALLOC(JSON_FREAD_BUF_SIZE);
+    size_t text_len = 0;
+    bool done = false;
+
+    do {
+        size_t num_read = fread(
+			buffer,
+			sizeof(*buffer),
+			JSON_FREAD_BUF_SIZE,
+			file
+		);
+
+        if (num_read != JSON_FREAD_BUF_SIZE) {
+            done = true;
+            ++num_read;
+        }
+
+        // copy buffer into doc->text
+        size_t last_len = text_len;
+
+        text_len += num_read;
+        text = (char *)json_fat_realloc(text, text_len);
+
+        memcpy(text + last_len, buffer, num_read * sizeof(*buffer));
+    } while (!done);
+
+    text[text_len - 1] = '\0';
+
+	free(buffer);
+
+	// load and cleanup
+	JSON_DEBUG("loading\n");
+
+	json_load(json, text);
+
+	json_fat_free(text);
+    fclose(file);
+}
+
+static void json_free_object(json_object_t *);
+
+static void json_free_array(json_object_t *object) {
+	json_vec_t *vec = object->data.vec;
+
+	for (size_t i = 0; i < vec->size; ++i) {
+		json_object_t *child = vec->data[i];
+
+		if (child->type == JSON_ARRAY)
+			json_free_array(child);
+		else if (child->type == JSON_OBJECT)
+			json_free_object(child);
+	}
+
+	json_fat_free(vec->data);
+}
+
+static void json_free_object(json_object_t *object) {
+	json_hmap_t *hmap = object->data.hmap;
+
+	for (size_t i = 0; i < hmap->cap; ++i) {
+		json_hnode_t *node = &hmap->nodes[i];
+
+		if (node->hash) {
+			if (node->object->type == JSON_ARRAY)
+				json_free_array(node->object);
+			else if (node->object->type == JSON_OBJECT)
+				json_free_object(node->object);
+		}
+	}
+
+	json_fat_free(hmap->vec.data);
+	json_fat_free(hmap->nodes);
+}
+
+// recursively free object hashmap and array vectors
+void json_unload(json_t *json) {
+	if (json->root) {
+		if (json->root->type == JSON_OBJECT)
+			json_free_object(json->root);
+		else
+			json_free_array(json->root);
+	}
+
+	for (size_t i = 0; i <= json->cur_page; ++i)
+		JSON_FREE(json->pages[i]);
+
+	json_fat_free(json->pages);
+}
+
+// pretty print api ============================================================
 
 static void json_fprint_level(FILE *file, int level) {
 	fprintf(file, "%*s", level << 2, "");
@@ -907,12 +1001,12 @@ static void json_fprint_array(FILE *file, json_object_t *object, int level) {
 
 	++level;
 
-	for (size_t i = 0; i < object->data.array->size; ++i) {
+	for (size_t i = 0; i < object->data.vec->size; ++i) {
 		if (i)
 			fprintf(file, ",\n");
 
 		json_fprint_level(file, level);
-		json_fprint_value(file, object->data.array->objects[i], level);
+		json_fprint_value(file, object->data.vec->data[i], level);
 	}
 
 	fprintf(file, "\n");
@@ -926,24 +1020,18 @@ static void json_fprint_obj(FILE *file, json_object_t *object, int level) {
 
 	++level;
 
-	json_lnode_t *trav = object->data.hmap->list_root;
+	json_hmap_t *hmap = object->data.hmap;
+	json_vec_t *vec = &hmap->vec;
 
-	while (trav) {
-		json_fprint_level(file, level);
-		json_fprint_string(file, trav->key);
-		fprintf(file, ": ");
-
-		// json_fprint_value(file, trav->object, level);
-		json_fprint_value(
-			file,
-			json_hmap_get(object->data.hmap, trav->key),
-			level
-		);
-
-		if (trav->next)
+	for (size_t i = 0; i < vec->size; ++i) {
+		if (i)
 			fprintf(file, ",\n");
 
-		trav = trav->next;
+		json_fprint_level(file, level);
+		json_fprint_string(file, vec->data[i]);
+		fprintf(file, ": ");
+
+		json_fprint_value(file, json_hmap_get(hmap, vec->data[i]), level);
 	}
 
 	fprintf(file, "\n");
@@ -1003,12 +1091,12 @@ bool json_get_bool(json_object_t *object, char *key) {
 json_object_t **json_to_array(json_object_t *object, size_t *out_size) {
 	JSON_ASSERT_PROPER_CAST(JSON_ARRAY);
 
-	json_array_t *array = object->data.array;
+	json_vec_t *vec = object->data.vec;
 
 	if (out_size)
-		*out_size = array->size;
+		*out_size = vec->size;
 
-	return array->objects;
+	return (json_object_t **)vec->data;
 }
 
 char *json_to_string(json_object_t *object) {
