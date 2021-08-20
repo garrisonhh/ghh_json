@@ -64,9 +64,9 @@ double json_to_number(json_object_t *);
 bool json_to_bool(json_object_t *);
 
 // remove a json_object from another json_object (unordered)
-json_object_t *json_pop(json_object_t *, char *key); // TODO
+json_object_t *json_pop(json_object_t *, char *key);
 // pop but ordered, this is O(n) rather than O(1) removal time
-json_object_t *json_pop_ordered(json_object_t *, char *key); // TODO
+json_object_t *json_pop_ordered(json_object_t *, char *key);
 
 // add a json_object to another json_object
 void json_put(json_object_t *, char *key, json_object_t *child);
@@ -291,6 +291,8 @@ static void json_vec_free_one(json_vec_t *vec) {
 			vec->cap * sizeof(*vec->data)
 		);
     }
+
+	--vec->size;
 }
 
 static void json_vec_make(json_vec_t *vec, size_t init_cap) {
@@ -308,12 +310,11 @@ static void json_vec_push(json_vec_t *vec, void *item) {
 }
 
 static void *json_vec_pop(json_vec_t *vec) {
-    json_object_t *item = (json_object_t *)vec->data[vec->size - 1];
+    json_object_t *object = (json_object_t *)vec->data[vec->size - 1];
 
     json_vec_free_one(vec);
-    --vec->size;
 
-    return item;
+    return object;
 }
 
 static void *json_vec_del(json_vec_t *vec, size_t index) {
@@ -340,11 +341,10 @@ static void *json_vec_del_ordered(json_vec_t *vec, size_t index) {
 	memmove(
 		vec->data + index,
 		vec->data + index + 1,
-		vec->size - index - 1
+		(vec->size - index - 1)  * sizeof(*vec->data)
 	);
 
     json_vec_free_one(vec);
-    --vec->size;
 
     return item;
 }
@@ -493,7 +493,49 @@ static json_object_t *json_hmap_get(json_hmap_t *hmap, char *key) {
 }
 
 static json_object_t *json_hmap_del(json_hmap_t *hmap, char *key, bool order) {
-	; // TODO
+	json_hash_t hash = json_hash_str(key);
+    size_t index = hash % hmap->cap;
+
+    // find node
+    while (hmap->nodes[index].hash != hash) {
+        if (!hmap->nodes[index].hash)
+            return NULL; // node doesn't exist
+
+        index = (index + 1) % hmap->cap;
+    }
+
+	json_object_t *object = hmap->nodes[index].object;
+
+    // replace chain
+    size_t last = index, steps = 0;
+
+    while (hmap->nodes[index = (index + 1) % hmap->cap].hash) {
+        if (hmap->nodes[index].steps >= ++steps) {
+            // found node that is a valid chain replacement
+            hmap->nodes[last] = hmap->nodes[index];
+            hmap->nodes[last].steps -= steps;
+            last = index;
+            steps = 0;
+        }
+    }
+
+    // last node in chain is now a duplicate
+    hmap->nodes[last].hash = 0;
+    json_hmap_free_slot(hmap);
+
+	// remove key from vec
+	for (size_t i = 0; i < hmap->vec.size; ++i) {
+		if (!strcmp(key, (char *)hmap->vec.data[i])) {
+			if (order)
+				json_vec_del_ordered(&hmap->vec, i);
+			else
+				json_vec_del(&hmap->vec, i);
+
+			break;
+		}
+	}
+
+	return object;
 }
 
 // parsing =====================================================================
@@ -1296,6 +1338,14 @@ bool json_to_bool(json_object_t *object) {
 	);
 
 	return object->type == JSON_TRUE;
+}
+
+json_object_t *json_pop(json_object_t *object, char *key) {
+	return json_hmap_del(object->data.hmap, key, false);
+}
+
+json_object_t *json_pop_ordered(json_object_t *object, char *key) {
+	return json_hmap_del(object->data.hmap, key, true);
 }
 
 json_object_t *json_new_object(json_t *json) {

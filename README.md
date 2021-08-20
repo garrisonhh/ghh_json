@@ -41,11 +41,6 @@ json_load_file(&json, "mydata.json");
 // do stuff ...
 
 json_unload(&json);
-json_load(&json, "{ \"raw\": \"json data.\"}");
-
-// do stuff...
-
-json_unload(&json);
 ```
 
 there are only 3 types you need to think about:
@@ -57,6 +52,88 @@ there are only 3 types you need to think about:
 - `json_object_t`, a tagged union
   - access type through `.type`
   - access data using `json_get` and `json_to` functions
+
+### examples
+
+```c
+// load json from a file and print it to stdout with formatting
+json_t json;
+json_load_file(&json, "data.json");
+
+char *str = json_serialize(json.root, false, 2, NULL);
+printf(str);
+free(str);
+
+json_unload(&json);
+```
+
+```c
+// load json data into a struct
+const char json_data[] = \
+"[{\"name\": \"henry\", \"age\": 21},"\
+" {\"name\": \"barb\", \"age\": 56}]";
+
+struct person { char *name; int age; } people[2];
+
+json_t json;
+json_load(&json, (char *)json_data);
+
+// grab array of objects
+size_t length;
+json_object_t **objects = json_to_array(json.root, &length);
+
+// retrieve object members
+for (size_t i = 0; i < length; ++i) {
+    people[i].name = strdup(json_get_string(objects[i], "name"));
+    people[i].age = (int)json_get_number(objects[i], "age");
+}
+
+json_unload(&json);
+```
+
+```c
+// create an empty json document, add data, and save
+const size_t num_countries = 3;
+struct country {
+    char *name;
+    int population;
+    bool is_dope;
+} countries[num_countries] = {
+    {"america", 3, true},
+    {"canada", 10000, true},
+    {"india", 56, true}
+};
+
+json_t json;
+json_load_empty(&json);
+
+// add data
+json.root = json_new_object(&json);
+
+for (size_t i = 0; i < num_countries; ++i) {
+    // create a new country entry
+    json_object_t *country = json_put_object(
+        &json,
+        json.root,
+        countries[i].name
+    );
+
+    // fill in country data
+    json_put_number(&json, country, "population", countries[i].population);
+    json_put_bool(&json, country, "is_dope", countries[i].is_dope);
+}
+
+// serialize and save to file
+char *str = json_serialize(json.root, false, 2, NULL);
+
+FILE *file = fopen("data.json", "w");
+fprintf(file, str);
+fclose(file);
+
+free(str);
+
+json_unload(&json);
+```
 
 ## api
 
