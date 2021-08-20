@@ -244,7 +244,7 @@ static void *json_tracked_alloc(json_t *json, size_t size) {
         size_t old_cap = json->tracked_cap;
 
         json->tracked_cap <<= 1;
-        json->tracked = json_fat_realloc(
+        json->tracked = (json_tptr_t **)json_fat_realloc(
             json->tracked,
             json->tracked_cap * sizeof(*json->tracked)
         );
