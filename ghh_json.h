@@ -41,13 +41,13 @@ typedef struct json {
 	size_t used; // tracks current page stack
 } json_t;
 
-void json_make(json_t *); // called by load functions, creates an empty json_t
 void json_load(json_t *, char *text);
+void json_load_empty(json_t *);
 void json_load_file(json_t *, const char *filepath);
 void json_unload(json_t *);
 
 // returns a string allocated with JSON_MALLOC
-char *json_serialize(json_object_t *, size_t *out_len);
+char *json_serialize(json_object_t *, bool mini, int indent, size_t *out_len);
 
 // take an object, retrieve data and cast
 json_object_t *json_get_object(json_object_t *, char *key);
@@ -63,13 +63,24 @@ char *json_to_string(json_object_t *);
 double json_to_number(json_object_t *);
 bool json_to_bool(json_object_t *);
 
+// remove a json_object from another json_object (unordered)
+json_object_t *json_pop(json_object_t *, char *key); // TODO
+// pop but ordered, this is O(n) rather than O(1) removal time
+json_object_t *json_pop_ordered(json_object_t *, char *key); // TODO
+
 // add a json_object to another json_object
 void json_put(json_object_t *, char *key, json_object_t *child);
 
-// remove a json_object from another json_object
-json_object_t *json_pop(json_object_t *, char *key); // TODO
-// retains order, O(n) rather than O(1) removal time
-json_object_t *json_pop_ordered(json_object_t *, char *key); // TODO
+// equivalent to calling json_new_type() and then json_put().
+// return the new object
+json_object_t *json_put_object(json_t *, json_object_t *, char *key);
+void json_put_array(
+	json_t *, json_object_t *, char *key, json_object_t **objects, size_t size
+);
+void json_put_string(json_t *, json_object_t *, char *key, char *string);
+void json_put_number(json_t *, json_object_t *, char *key, double number);
+void json_put_bool(json_t *, json_object_t *, char *key, bool value);
+void json_put_null(json_t *, json_object_t *, char *key);
 
 // create a json data type on a json_t memory context
 json_object_t *json_new_object(json_t *);
@@ -270,7 +281,6 @@ static void json_vec_alloc_one(json_vec_t *vec) {
     }
 }
 
-/*
 static void json_vec_free_one(json_vec_t *vec) {
 	JSON_ASSERT(vec->size, "popped from vec of size zero.\n");
 
@@ -282,7 +292,6 @@ static void json_vec_free_one(json_vec_t *vec) {
 		);
     }
 }
-*/
 
 static void json_vec_make(json_vec_t *vec, size_t init_cap) {
     vec->size = 0;
@@ -298,7 +307,6 @@ static void json_vec_push(json_vec_t *vec, void *item) {
     vec->data[vec->size++] = item;
 }
 
-/*
 static void *json_vec_pop(json_vec_t *vec) {
     json_object_t *item = (json_object_t *)vec->data[vec->size - 1];
 
@@ -307,10 +315,38 @@ static void *json_vec_pop(json_vec_t *vec) {
 
     return item;
 }
-*/
 
-static inline void *json_vec_peek(json_vec_t *vec) {
-	return vec->data[vec->size - 1];
+static void *json_vec_del(json_vec_t *vec, size_t index) {
+	JSON_ASSERT(
+		index < vec->size,
+		"attempted to delete vec item past it's size.\n"
+	);
+
+	void *item = vec->data[index];
+
+	vec->data[index] = json_vec_pop(vec);
+
+	return item;
+}
+
+static void *json_vec_del_ordered(json_vec_t *vec, size_t index) {
+	JSON_ASSERT(
+		index < vec->size,
+		"attempted to delete vec item past it's size.\n"
+	);
+
+	void *item = vec->data[index];
+
+	memmove(
+		vec->data + index,
+		vec->data + index + 1,
+		vec->size - index - 1
+	);
+
+    json_vec_free_one(vec);
+    --vec->size;
+
+    return item;
 }
 
 // hashmap =====================================================================
@@ -454,6 +490,10 @@ static json_object_t *json_hmap_get(json_hmap_t *hmap, char *key) {
 	json_hnode_t *node = json_hmap_get_node(hmap, json_hash_str(key));
 
     return node ? node->object : NULL;
+}
+
+static json_object_t *json_hmap_del(json_hmap_t *hmap, char *key, bool order) {
+	; // TODO
 }
 
 // parsing =====================================================================
@@ -835,7 +875,7 @@ static void json_parse(json_t *json, const char *text) {
 
 // lifetime api ================================================================
 
-void json_make(json_t *json) {
+void json_load_empty(json_t *json) {
 	// no ZII in cpp :(
 	json->root = NULL;
 
@@ -851,7 +891,7 @@ void json_make(json_t *json) {
 static void json_parse(json_t *json, const char *text);
 
 void json_load(json_t *json, char *text) {
-	json_make(json);
+	json_load_empty(json);
 	json_parse(json, text);
 }
 
@@ -911,7 +951,7 @@ static void json_free_array(json_object_t *object) {
 	json_vec_t *vec = object->data.vec;
 
 	for (size_t i = 0; i < vec->size; ++i) {
-		json_object_t *child = vec->data[i];
+		json_object_t *child = (json_object_t *)vec->data[i];
 
 		if (child->type == JSON_ARRAY)
 			json_free_array(child);
@@ -974,6 +1014,9 @@ typedef struct json_serializer {
 	json_stringy_t stringy;
 	char *buf;
 	int level;
+
+	int indent, nlwidth;
+	bool mini;
 } json_serializer_t;
 
 static void json_stringy_make(json_stringy_t *stringy) {
@@ -987,7 +1030,7 @@ static inline void json_stringy_kill(json_stringy_t *stringy) {
 }
 
 static void json_stringy_append(
-	json_stringy_t *stringy, char *str, size_t len
+	json_stringy_t *stringy, const char *str, size_t len
 ) {
 	if (stringy->pos + len >= stringy->cap) {
 		stringy->cap <<= 1;
@@ -997,7 +1040,11 @@ static void json_stringy_append(
 		);
 	}
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-truncation"
 	strncpy(stringy->str + stringy->pos, str, len);
+#pragma GCC diagnostic pop
+
 	stringy->pos += len;
 }
 
@@ -1026,10 +1073,12 @@ static void json_serialize_string(json_serializer_t *ser_ctx, char *str) {
 }
 
 static inline void json_serialize_indent(json_serializer_t *ser_ctx) {
-	int indent = ser_ctx->level << 2;
+	if (!ser_ctx->mini) {
+		int indent = ser_ctx->level * ser_ctx->indent;
 
-	sprintf(ser_ctx->buf, "%*s", indent, "");
-	json_stringy_append(&ser_ctx->stringy, ser_ctx->buf, indent);
+		sprintf(ser_ctx->buf, "%*s", indent, "");
+		json_stringy_append(&ser_ctx->stringy, ser_ctx->buf, indent);
+	}
 }
 
 static void json_serialize_array(json_serializer_t *, json_object_t *);
@@ -1082,19 +1131,23 @@ static void json_serialize_value(
 static void json_serialize_array(
 	json_serializer_t *ser_ctx, json_object_t *object
 ) {
-	json_stringy_append(&ser_ctx->stringy, "[\n", 2);
+	json_stringy_append(&ser_ctx->stringy, "[\n", ser_ctx->nlwidth);
 
 	++ser_ctx->level;
 
 	for (size_t i = 0; i < object->data.vec->size; ++i) {
 		if (i)
-			json_stringy_append(&ser_ctx->stringy, ",\n", 2);
+			json_stringy_append(&ser_ctx->stringy, ",\n", ser_ctx->nlwidth);
 
 		json_serialize_indent(ser_ctx);
-		json_serialize_value(ser_ctx, object->data.vec->data[i]);
+		json_serialize_value(
+			ser_ctx,
+			(json_object_t *)object->data.vec->data[i]
+		);
 	}
 
-	json_stringy_append(&ser_ctx->stringy, "\n", 1);
+	if (!ser_ctx->mini)
+		json_stringy_append(&ser_ctx->stringy, "\n", 1);
 
 	--ser_ctx->level;
 
@@ -1105,7 +1158,7 @@ static void json_serialize_array(
 static void json_serialize_obj(
 	json_serializer_t *ser_ctx, json_object_t *object
 ) {
-	json_stringy_append(&ser_ctx->stringy, "{\n", 2);
+	json_stringy_append(&ser_ctx->stringy, "{\n", ser_ctx->nlwidth);
 
 	++ser_ctx->level;
 
@@ -1113,17 +1166,22 @@ static void json_serialize_obj(
 	json_vec_t *vec = &hmap->vec;
 
 	for (size_t i = 0; i < vec->size; ++i) {
-		if (i)
-			json_stringy_append(&ser_ctx->stringy, ",\n", 2);
+		if (i) {
+			json_stringy_append(&ser_ctx->stringy, ",\n", ser_ctx->nlwidth);
+		}
 
 		json_serialize_indent(ser_ctx);
-		json_serialize_string(ser_ctx, vec->data[i]);
-		json_stringy_append(&ser_ctx->stringy, ": ", 2);
+		json_serialize_string(ser_ctx, (char *)vec->data[i]);
+		json_stringy_append(&ser_ctx->stringy, ": ", ser_ctx->nlwidth);
 
-		json_serialize_value(ser_ctx, json_hmap_get(hmap, vec->data[i]));
+		json_serialize_value(
+			ser_ctx,
+			json_hmap_get(hmap, (char *)vec->data[i])
+		);
 	}
 
-	json_stringy_append(&ser_ctx->stringy, "\n", 1);
+	if (!ser_ctx->mini)
+		json_stringy_append(&ser_ctx->stringy, "\n", 1);
 
 	--ser_ctx->level;
 
@@ -1131,7 +1189,9 @@ static void json_serialize_obj(
 	json_stringy_append(&ser_ctx->stringy, "}", 1);
 }
 
-char *json_serialize(json_object_t *object, size_t *out_len) {
+char *json_serialize(
+	json_object_t *object, bool mini, int indent, size_t *out_len
+) {
 	if (!object)
 		JSON_ERROR("attempted to serialize a NULL object.\n");
 
@@ -1140,8 +1200,11 @@ char *json_serialize(json_object_t *object, size_t *out_len) {
 
 	json_stringy_make(&ser_ctx.stringy);
 
-	ser_ctx.buf = JSON_MALLOC(JSON_SERIALIZER_BUF_SIZE);
+	ser_ctx.buf = (char *)JSON_MALLOC(JSON_SERIALIZER_BUF_SIZE);
 	ser_ctx.level = 0;
+	ser_ctx.indent = indent;
+	ser_ctx.mini = mini;
+	ser_ctx.nlwidth = ser_ctx.mini ? 1 : 2;
 
 	json_serialize_value(&ser_ctx, object);
 	json_stringy_append(&ser_ctx.stringy, "\n", 2);
@@ -1150,7 +1213,7 @@ char *json_serialize(json_object_t *object, size_t *out_len) {
 
 	// return serialized string
 	size_t len = ser_ctx.stringy.pos;
-	char *serialized = JSON_MALLOC((len + 1) * sizeof(*serialized));
+	char *serialized = (char *)JSON_MALLOC((len + 1) * sizeof(*serialized));
 
 	if (out_len)
 		*out_len = len;
@@ -1170,7 +1233,7 @@ char *json_serialize(json_object_t *object, size_t *out_len) {
 		json_types[object->type], json_types[json_type]\
 	)
 
-static json_object_t *json_empty_object(json_t *json) {
+static inline json_object_t *json_empty_object(json_t *json) {
 	return (json_object_t *)json_page_alloc(json, sizeof(json_object_t));
 }
 
@@ -1309,6 +1372,41 @@ void json_put(json_object_t *object, char *key, json_object_t *child) {
 	);
 
 	json_hmap_put(object->data.hmap, key, child);
+}
+
+json_object_t *json_put_object(json_t *json, json_object_t *object, char *key) {
+	json_object_t *child = json_new_object(json);
+
+	json_put(object, key, child);
+
+	return child;
+}
+
+void json_put_array(
+	json_t *json, json_object_t *object, char *key,
+	json_object_t **objects, size_t size
+) {
+	json_put(object, key, json_new_array(json, objects, size));
+}
+
+void json_put_string(
+	json_t *json, json_object_t *object, char *key, char *string
+) {
+	json_put(object, key, json_new_string(json, string));
+}
+
+void json_put_number(
+	json_t *json, json_object_t *object, char *key, double number
+) {
+	json_put(object, key, json_new_number(json, number));
+}
+
+void json_put_bool(json_t *json, json_object_t *object, char *key, bool value) {
+	json_put(object, key, json_new_bool(json, value));
+}
+
+void json_put_null(json_t *json, json_object_t *object, char *key) {
+	json_put(object, key, json_new_null(json));
 }
 
 #endif // GHH_JSON_IMPL
