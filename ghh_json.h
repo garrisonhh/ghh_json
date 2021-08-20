@@ -36,8 +36,8 @@ typedef struct json {
     json_object_t *root;
 
     // allocators
-    void **tracked; // fat ptr
-    char **pages; // fat ptr
+    struct json_tptr **tracked; // fat pointer array of tracked pointers
+    char **pages; // fat pointer
     size_t cur_tracked, tracked_cap; // tracks tracked pointers
     size_t cur_page, page_cap; // tracks allocator pages
     size_t used; // tracks current page stack
@@ -244,11 +244,13 @@ static void *json_tracked_alloc(json_t *json, size_t size) {
         size_t old_cap = json->tracked_cap;
 
         json->tracked_cap <<= 1;
-        json->tracked = json_fat_realloc(json->tracked, json->tracked_cap);
+        json->tracked = json_fat_realloc(
+            json->tracked,
+            json->tracked_cap * sizeof(*json->tracked)
+        );
 
         for (size_t i = old_cap; i < json->tracked_cap; ++i)
             json->tracked[i] = NULL;
-
     }
 
     json->tracked[tptr->index] = tptr;
@@ -1022,7 +1024,7 @@ void json_load_empty(json_t *json) {
     // tracking allocator
     json->cur_tracked = 0;
     json->tracked_cap = JSON_INIT_TRACKED_CAP;
-    json->tracked = (void **)json_fat_alloc(
+    json->tracked = (json_tptr_t **)json_fat_alloc(
         json->tracked_cap * sizeof(*json->tracked)
     );
 
