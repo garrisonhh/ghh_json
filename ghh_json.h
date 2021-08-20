@@ -41,25 +41,43 @@ typedef struct json {
 	size_t used; // tracks current page stack
 } json_t;
 
+void json_make(json_t *); // called by load functions, creates an empty json_t
 void json_load(json_t *, char *text);
 void json_load_file(json_t *, const char *filepath);
 void json_unload(json_t *);
 
-void json_print(json_object_t *);
-void json_fprint(FILE *, json_object_t *);
+// returns a string allocated with JSON_MALLOC
+char *json_serialize(json_object_t *, size_t *out_len);
 
 // take an object, retrieve data and cast
 json_object_t *json_get_object(json_object_t *, char *key);
+// returns actual, mutable array pointer
 json_object_t **json_get_array(json_object_t *, char *key, size_t *out_size);
 char *json_get_string(json_object_t *, char *key);
 double json_get_number(json_object_t *, char *key);
 bool json_get_bool(json_object_t *, char *key);
 
-// cast object to data type
+// cast an object to a data type
 json_object_t **json_to_array(json_object_t *, size_t *out_size);
 char *json_to_string(json_object_t *);
 double json_to_number(json_object_t *);
 bool json_to_bool(json_object_t *);
+
+// add a json_object to another json_object
+void json_put(json_object_t *, char *key, json_object_t *child);
+
+// remove a json_object from another json_object
+json_object_t *json_pop(json_object_t *, char *key); // TODO
+// retains order, O(n) rather than O(1) removal time
+json_object_t *json_pop_ordered(json_object_t *, char *key); // TODO
+
+// create a json data type on a json_t memory context
+json_object_t *json_new_object(json_t *);
+json_object_t *json_new_array(json_t *, json_object_t **objects, size_t size);
+json_object_t *json_new_string(json_t *, char *string);
+json_object_t *json_new_number(json_t *, double number);
+json_object_t *json_new_bool(json_t *, bool value);
+json_object_t *json_new_null(json_t *);
 
 #ifdef GHH_JSON_IMPL
 
@@ -235,6 +253,8 @@ static void *json_page_alloc(json_t *json, size_t size) {
 
 // array (vector) ==============================================================
 
+#define JSON_VEC_INIT_CAP 8
+
 typedef struct json_vec {
     void **data; // fat ptr
     size_t size, cap, min_cap;
@@ -250,6 +270,7 @@ static void json_vec_alloc_one(json_vec_t *vec) {
     }
 }
 
+/*
 static void json_vec_free_one(json_vec_t *vec) {
 	JSON_ASSERT(vec->size, "popped from vec of size zero.\n");
 
@@ -261,6 +282,7 @@ static void json_vec_free_one(json_vec_t *vec) {
 		);
     }
 }
+*/
 
 static void json_vec_make(json_vec_t *vec, size_t init_cap) {
     vec->size = 0;
@@ -276,6 +298,7 @@ static void json_vec_push(json_vec_t *vec, void *item) {
     vec->data[vec->size++] = item;
 }
 
+/*
 static void *json_vec_pop(json_vec_t *vec) {
     json_object_t *item = (json_object_t *)vec->data[vec->size - 1];
 
@@ -284,12 +307,15 @@ static void *json_vec_pop(json_vec_t *vec) {
 
     return item;
 }
+*/
 
 static inline void *json_vec_peek(json_vec_t *vec) {
 	return vec->data[vec->size - 1];
 }
 
 // hashmap =====================================================================
+
+#define JSON_HMAP_INIT_CAP 8
 
 #if INTPTR_MAX == INT64_MAX
 // 64 bit
@@ -685,7 +711,7 @@ static json_object_t *json_expect_array(
 	json_ctx_t *ctx, json_object_t *object
 ) {
 	json_vec_t *vec = (json_vec_t *)json_page_alloc(ctx->json, sizeof(*vec));
-	json_vec_make(vec, 8);
+	json_vec_make(vec, JSON_VEC_INIT_CAP);
 
 	object->data.vec = vec;
 
@@ -723,7 +749,7 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
 		ctx->json,
 		sizeof(*hmap)
 	);
-	json_hmap_make(hmap, 8);
+	json_hmap_make(hmap, JSON_HMAP_INIT_CAP);
 
 	object->data.hmap = hmap;
 
@@ -809,8 +835,7 @@ static void json_parse(json_t *json, const char *text) {
 
 // lifetime api ================================================================
 
-// internal json_t initializer
-static void json_make(json_t *json) {
+void json_make(json_t *json) {
 	// no ZII in cpp :(
 	json->root = NULL;
 
@@ -930,128 +955,213 @@ void json_unload(json_t *json) {
 	json_fat_free(json->pages);
 }
 
-// pretty print api ============================================================
+// serialization api ===========================================================
 
-static void json_fprint_level(FILE *file, int level) {
-	fprintf(file, "%*s", level << 2, "");
+#ifndef JSON_SERIALIZER_BUF_SIZE
+#define JSON_SERIALIZER_BUF_SIZE 1024
+#endif
+
+#define JSON_STRINGY_INIT_CAP 256
+
+// string builder
+typedef struct json_stringy {
+	char *str;
+	size_t pos, cap;
+} json_stringy_t;
+
+// serialization context
+typedef struct json_serializer {
+	json_stringy_t stringy;
+	char *buf;
+	int level;
+} json_serializer_t;
+
+static void json_stringy_make(json_stringy_t *stringy) {
+	stringy->cap = JSON_STRINGY_INIT_CAP;
+	stringy->str = (char *)json_fat_alloc(stringy->cap);
+	stringy->pos = 0;
 }
 
-// handles escape characters
-// TODO json_escape_string?
-static void json_fprint_string(FILE *file, char *str) {
-	fprintf(file, "\"");
+static inline void json_stringy_kill(json_stringy_t *stringy) {
+	json_fat_free(stringy->str);
+}
+
+static void json_stringy_append(
+	json_stringy_t *stringy, char *str, size_t len
+) {
+	if (stringy->pos + len >= stringy->cap) {
+		stringy->cap <<= 1;
+		stringy->str = (char *)json_fat_realloc(
+			stringy->str,
+			stringy->cap * sizeof(*stringy->str)
+		);
+	}
+
+	strncpy(stringy->str + stringy->pos, str, len);
+	stringy->pos += len;
+}
+
+static void json_serialize_string(json_serializer_t *ser_ctx, char *str) {
+	json_stringy_append(&ser_ctx->stringy, "\"", 1);
 
 	while (*str) {
 		switch (*str) {
-#define X(a, b) case b: fprintf(file, "\\%c", a); break;
+#define X(a, b)\
+		case b:\
+			sprintf(ser_ctx->buf, "\\%c", a);\
+			json_stringy_append(&ser_ctx->stringy, ser_ctx->buf, 2);\
+			break;
+
 		JSON_ESCAPE_CHARACTERS_X
 #undef X
 		default:
-			fprintf(file, "%c", *str);
+			json_stringy_append(&ser_ctx->stringy, str, 1);\
 			break;
 		}
 
 		++str;
 	}
 
-	fprintf(file, "\"");
+	json_stringy_append(&ser_ctx->stringy, "\"", 1);
 }
 
-static void json_fprint_array(FILE *file, json_object_t *object, int level);
-static void json_fprint_obj(FILE *file, json_object_t *object, int level);
+static inline void json_serialize_indent(json_serializer_t *ser_ctx) {
+	int indent = ser_ctx->level << 2;
 
-static void json_fprint_value(FILE *file, json_object_t *object, int level) {
+	sprintf(ser_ctx->buf, "%*s", indent, "");
+	json_stringy_append(&ser_ctx->stringy, ser_ctx->buf, indent);
+}
+
+static void json_serialize_array(json_serializer_t *, json_object_t *);
+static void json_serialize_obj(json_serializer_t *, json_object_t *);
+
+static void json_serialize_value(
+	json_serializer_t *ser_ctx, json_object_t *object
+) {
 	switch (object->type) {
 	case JSON_OBJECT:
-		json_fprint_obj(file, object, level);
+		json_serialize_obj(ser_ctx, object);
 
 		break;
 	case JSON_ARRAY:
-		json_fprint_array(file, object, level);
+		json_serialize_array(ser_ctx, object);
 
 		break;
 	case JSON_STRING:
-		json_fprint_string(file, object->data.string);
+		json_serialize_string(ser_ctx, object->data.string);
 
 		break;
 	case JSON_NUMBER:
 		if ((long)object->data.number == object->data.number)
-			fprintf(file, "%ld", (long)object->data.number);
+			sprintf(ser_ctx->buf, "%ld", (long)object->data.number);
 		else
-			fprintf(file, "%lf", object->data.number);
+			sprintf(ser_ctx->buf, "%lf", object->data.number);
+
+		json_stringy_append(
+			&ser_ctx->stringy,
+			ser_ctx->buf,
+			strlen(ser_ctx->buf)
+		);
 
 		break;
 	case JSON_TRUE:
-		fprintf(file, "true");
+		json_stringy_append(&ser_ctx->stringy, "true", 4);
 
 		break;
 	case JSON_FALSE:
-		fprintf(file, "false");
+		json_stringy_append(&ser_ctx->stringy, "false", 5);
 
 		break;
 	case JSON_NULL:
-		fprintf(file, "null");
+		json_stringy_append(&ser_ctx->stringy, "null", 4);
 
 		break;
 	}
 }
 
-static void json_fprint_array(FILE *file, json_object_t *object, int level) {
-	fprintf(file, "[\n");
+static void json_serialize_array(
+	json_serializer_t *ser_ctx, json_object_t *object
+) {
+	json_stringy_append(&ser_ctx->stringy, "[\n", 2);
 
-	++level;
+	++ser_ctx->level;
 
 	for (size_t i = 0; i < object->data.vec->size; ++i) {
 		if (i)
-			fprintf(file, ",\n");
+			json_stringy_append(&ser_ctx->stringy, ",\n", 2);
 
-		json_fprint_level(file, level);
-		json_fprint_value(file, object->data.vec->data[i], level);
+		json_serialize_indent(ser_ctx);
+		json_serialize_value(ser_ctx, object->data.vec->data[i]);
 	}
 
-	fprintf(file, "\n");
+	json_stringy_append(&ser_ctx->stringy, "\n", 1);
 
-	json_fprint_level(file, level - 1);
-	fprintf(file, "]");
+	--ser_ctx->level;
+
+	json_serialize_indent(ser_ctx);
+	json_stringy_append(&ser_ctx->stringy, "]", 1);
 }
 
-static void json_fprint_obj(FILE *file, json_object_t *object, int level) {
-	fprintf(file, "{\n");
+static void json_serialize_obj(
+	json_serializer_t *ser_ctx, json_object_t *object
+) {
+	json_stringy_append(&ser_ctx->stringy, "{\n", 2);
 
-	++level;
+	++ser_ctx->level;
 
 	json_hmap_t *hmap = object->data.hmap;
 	json_vec_t *vec = &hmap->vec;
 
 	for (size_t i = 0; i < vec->size; ++i) {
 		if (i)
-			fprintf(file, ",\n");
+			json_stringy_append(&ser_ctx->stringy, ",\n", 2);
 
-		json_fprint_level(file, level);
-		json_fprint_string(file, vec->data[i]);
-		fprintf(file, ": ");
+		json_serialize_indent(ser_ctx);
+		json_serialize_string(ser_ctx, vec->data[i]);
+		json_stringy_append(&ser_ctx->stringy, ": ", 2);
 
-		json_fprint_value(file, json_hmap_get(hmap, vec->data[i]), level);
+		json_serialize_value(ser_ctx, json_hmap_get(hmap, vec->data[i]));
 	}
 
-	fprintf(file, "\n");
+	json_stringy_append(&ser_ctx->stringy, "\n", 1);
 
-	json_fprint_level(file, level - 1);
-	fprintf(file, "}");
+	--ser_ctx->level;
+
+	json_serialize_indent(ser_ctx);
+	json_stringy_append(&ser_ctx->stringy, "}", 1);
 }
 
-void json_fprint(FILE *file, json_object_t *object) {
-	JSON_ASSERT(object, "attempted to json_fprint a NULL object pointer.\n");
+char *json_serialize(json_object_t *object, size_t *out_len) {
+	if (!object)
+		JSON_ERROR("attempted to serialize a NULL object.\n");
 
-	json_fprint_value(file, object, 0);
-	fprintf(file, "\n");
+	// create and use serializer
+	json_serializer_t ser_ctx;
+
+	json_stringy_make(&ser_ctx.stringy);
+
+	ser_ctx.buf = JSON_MALLOC(JSON_SERIALIZER_BUF_SIZE);
+	ser_ctx.level = 0;
+
+	json_serialize_value(&ser_ctx, object);
+	json_stringy_append(&ser_ctx.stringy, "\n", 2);
+
+	JSON_FREE(ser_ctx.buf);
+
+	// return serialized string
+	size_t len = ser_ctx.stringy.pos;
+	char *serialized = JSON_MALLOC((len + 1) * sizeof(*serialized));
+
+	if (out_len)
+		*out_len = len;
+
+	strcpy(serialized, ser_ctx.stringy.str);
+	json_stringy_kill(&ser_ctx.stringy);
+
+	return serialized;
 }
 
-void json_print(json_object_t *object) {
-	json_fprint(stdout, object);
-}
-
-// get api =====================================================================
+// get/put/to api functions ====================================================
 
 #define JSON_ASSERT_PROPER_CAST(json_type)\
 	JSON_ASSERT(\
@@ -1059,6 +1169,10 @@ void json_print(json_object_t *object) {
 		"attempted to cast %s to %s.\n",\
 		json_types[object->type], json_types[json_type]\
 	)
+
+static json_object_t *json_empty_object(json_t *json) {
+	return (json_object_t *)json_page_alloc(json, sizeof(json_object_t));
+}
 
 json_object_t *json_get_object(json_object_t *object, char *key) {
 	JSON_ASSERT(
@@ -1119,6 +1233,82 @@ bool json_to_bool(json_object_t *object) {
 	);
 
 	return object->type == JSON_TRUE;
+}
+
+json_object_t *json_new_object(json_t *json) {
+	json_object_t *object = json_empty_object(json);
+
+	object->type = JSON_OBJECT;
+	object->data.hmap = (json_hmap_t *)json_page_alloc(
+		json,
+		sizeof(*object->data.hmap)
+	);
+
+	json_hmap_make(object->data.hmap, JSON_HMAP_INIT_CAP);
+
+	return object;
+}
+
+json_object_t *json_new_array(
+	json_t *json, json_object_t **objects, size_t size
+) {
+	json_object_t *object = json_empty_object(json);
+
+	object->type = JSON_ARRAY;
+	object->data.vec = (json_vec_t *)json_page_alloc(
+		json,
+		sizeof(*object->data.vec)
+	);
+
+	json_vec_make(object->data.vec, size);
+
+	for (size_t i = 0; i < size; ++i)
+		json_vec_push(object->data.vec, objects[i]);
+
+	return object;
+}
+
+json_object_t *json_new_string(json_t *json, char *string) {
+	json_object_t *object = json_empty_object(json);
+
+	object->type = JSON_STRING;
+	object->data.string = string;
+
+	return object;
+}
+
+json_object_t *json_new_number(json_t *json, double number) {
+	json_object_t *object = json_empty_object(json);
+
+	object->type = JSON_NUMBER;
+	object->data.number = number;
+
+	return object;
+}
+
+json_object_t *json_new_bool(json_t *json, bool value) {
+	json_object_t *object = json_empty_object(json);
+
+	object->type = value ? JSON_TRUE : JSON_FALSE;
+
+	return object;
+}
+
+json_object_t *json_new_null(json_t *json) {
+	json_object_t *object = json_empty_object(json);
+
+	object->type = JSON_NULL;
+
+	return object;
+}
+
+void json_put(json_object_t *object, char *key, json_object_t *child) {
+	JSON_ASSERT(
+		object->type == JSON_OBJECT,
+		"called put_object on a non-object.\n"
+	);
+
+	json_hmap_put(object->data.hmap, key, child);
 }
 
 #endif // GHH_JSON_IMPL
