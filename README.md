@@ -113,12 +113,12 @@ bool json_to_bool(json_object_t *);
 
 ```c
 // remove a json_object from another json_object (unordered)
-json_object_t *json_pop(json_object_t *, char *key);
+json_object_t *json_pop(json_t *, json_object_t *, char *key);
 // pop but ordered, this is O(n) rather than O(1) removal time
-json_object_t *json_pop_ordered(json_object_t *, char *key);
+json_object_t *json_pop_ordered(json_t *, json_object_t *, char *key);
 
 // add a json_object to another json_object
-void json_put(json_object_t *, char *key, json_object_t *child);
+void json_put(json_t *, json_object_t *, char *key, json_object_t *child);
 
 // create a new json type on a json_t, and add it to an object
 json_object_t *json_put_object(json_t *, json_object_t *, char *key);

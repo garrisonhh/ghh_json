@@ -66,12 +66,12 @@ double json_to_number(json_object_t *);
 bool json_to_bool(json_object_t *);
 
 // remove a json_object from another json_object (unordered)
-json_object_t *json_pop(json_object_t *, char *key);
+json_object_t *json_pop(json_t *, json_object_t *, char *key);
 // pop but ordered, this is O(n) rather than O(1) removal time
-json_object_t *json_pop_ordered(json_object_t *, char *key);
+json_object_t *json_pop_ordered(json_t *, json_object_t *, char *key);
 
 // add a json_object to another json_object
-void json_put(json_object_t *, char *key, json_object_t *child);
+void json_put(json_t *, json_object_t *, char *key, json_object_t *child);
 
 // equivalent to calling json_new_type() and then json_put().
 // return the new object
@@ -313,22 +313,24 @@ typedef struct json_vec {
     size_t size, cap, min_cap;
 } json_vec_t;
 
-static void json_vec_alloc_one(json_vec_t *vec) {
+static void json_vec_alloc_one(json_t *json, json_vec_t *vec) {
     if (vec->size + 1 > vec->cap) {
         vec->cap <<= 1;
-        vec->data = (void **)json_fat_realloc(
+        vec->data = (void **)json_tracked_realloc(
+			json,
 			vec->data,
 			vec->cap * sizeof(*vec->data)
 		);
     }
 }
 
-static void json_vec_free_one(json_vec_t *vec) {
+static void json_vec_free_one(json_t *json, json_vec_t *vec) {
 	JSON_ASSERT(vec->size, "popped from vec of size zero.\n");
 
     if (vec->cap > vec->min_cap && vec->size < vec->cap >> 2) {
         vec->cap >>= 1;
-        vec->data = (void **)json_fat_realloc(
+        vec->data = (void **)json_tracked_realloc(
+			json,
 			vec->data,
 			vec->cap * sizeof(*vec->data)
 		);
@@ -337,29 +339,29 @@ static void json_vec_free_one(json_vec_t *vec) {
 	--vec->size;
 }
 
-static void json_vec_make(json_vec_t *vec, size_t init_cap) {
+static void json_vec_make(json_t *json, json_vec_t *vec, size_t init_cap) {
     vec->size = 0;
     vec->min_cap = vec->cap = init_cap;
 
-    vec->data = (void **)json_fat_alloc(
+    vec->data = (void **)json_tracked_alloc(
+		json,
 		vec->cap * sizeof(*vec->data)
 	);
 }
 
-static void json_vec_push(json_vec_t *vec, void *item) {
-    json_vec_alloc_one(vec);
+static void json_vec_push(json_t *json, json_vec_t *vec, void *item) {
+    json_vec_alloc_one(json, vec);
     vec->data[vec->size++] = item;
 }
 
-static void *json_vec_pop(json_vec_t *vec) {
+static void *json_vec_pop(json_t *json, json_vec_t *vec) {
     json_object_t *object = (json_object_t *)vec->data[vec->size - 1];
-
-    json_vec_free_one(vec);
+    json_vec_free_one(json, vec);
 
     return object;
 }
 
-static void *json_vec_del(json_vec_t *vec, size_t index) {
+static void *json_vec_del(json_t *json, json_vec_t *vec, size_t index) {
 	JSON_ASSERT(
 		index < vec->size,
 		"attempted to delete vec item past it's size.\n"
@@ -367,12 +369,14 @@ static void *json_vec_del(json_vec_t *vec, size_t index) {
 
 	void *item = vec->data[index];
 
-	vec->data[index] = json_vec_pop(vec);
+	vec->data[index] = json_vec_pop(json, vec);
 
 	return item;
 }
 
-static void *json_vec_del_ordered(json_vec_t *vec, size_t index) {
+static void *json_vec_del_ordered(
+	json_t *json, json_vec_t *vec, size_t index
+) {
 	JSON_ASSERT(
 		index < vec->size,
 		"attempted to delete vec item past it's size.\n"
@@ -386,7 +390,7 @@ static void *json_vec_del_ordered(json_vec_t *vec, size_t index) {
 		(vec->size - index - 1)  * sizeof(*vec->data)
 	);
 
-    json_vec_free_one(vec);
+    json_vec_free_one(json, vec);
 
     return item;
 }
@@ -429,8 +433,9 @@ static json_hash_t json_hash_str(char *str) {
     return hash;
 }
 
-static json_hnode_t *json_hnodes_alloc(size_t num_nodes) {
-	json_hnode_t *nodes = (json_hnode_t *)json_fat_alloc(
+static json_hnode_t *json_hnodes_alloc(json_t *json, size_t num_nodes) {
+	json_hnode_t *nodes = (json_hnode_t *)json_tracked_alloc(
+		json,
 		num_nodes * sizeof(json_hnode_t)
 	);
 
@@ -440,14 +445,14 @@ static json_hnode_t *json_hnodes_alloc(size_t num_nodes) {
 	return nodes;
 }
 
-static void json_hmap_put_node(json_hmap_t *, json_hnode_t *);
+static void json_hmap_put_node(json_t *, json_hmap_t *, json_hnode_t *);
 
-static void json_hmap_rehash(json_hmap_t *hmap, size_t new_cap) {
+static void json_hmap_rehash(json_t *json, json_hmap_t *hmap, size_t new_cap) {
     json_hnode_t *old_nodes = hmap->nodes;
     size_t old_cap = hmap->cap;
 
     hmap->cap = new_cap;
-    hmap->nodes = json_hnodes_alloc(hmap->cap);
+    hmap->nodes = json_hnodes_alloc(json, hmap->cap);
     hmap->size = 0;
 
     for (size_t i = 0; i < old_cap; ++i) {
@@ -455,33 +460,35 @@ static void json_hmap_rehash(json_hmap_t *hmap, size_t new_cap) {
             old_nodes[i].index = old_nodes[i].hash % hmap->cap;
             old_nodes[i].steps = 0;
 
-            json_hmap_put_node(hmap, &old_nodes[i]);
+            json_hmap_put_node(json, hmap, &old_nodes[i]);
         }
     }
 
-    json_fat_free(old_nodes);
+    json_tracked_free(json, old_nodes);
 }
 
-static inline void json_hmap_alloc_slot(json_hmap_t *hmap) {
+static inline void json_hmap_alloc_slot(json_t *json, json_hmap_t *hmap) {
     if (++hmap->size > hmap->cap >> 1)
-        json_hmap_rehash(hmap, hmap->cap << 1);
+        json_hmap_rehash(json, hmap, hmap->cap << 1);
 }
 
-static inline void json_hmap_free_slot(json_hmap_t *hmap) {
+static inline void json_hmap_free_slot(json_t *json, json_hmap_t *hmap) {
     if (hmap->size-- < hmap->cap >> 2 && hmap->cap > hmap->min_cap)
-        json_hmap_rehash(hmap, hmap->cap >> 1);
+        json_hmap_rehash(json, hmap, hmap->cap >> 1);
 }
 
-static void json_hmap_make(json_hmap_t *hmap, size_t init_cap) {
-	json_vec_make(&hmap->vec, init_cap);
+static void json_hmap_make(json_t *json, json_hmap_t *hmap, size_t init_cap) {
+	json_vec_make(json, &hmap->vec, init_cap);
 
     hmap->size = 0;
     hmap->cap = hmap->min_cap = init_cap;
-    hmap->nodes = json_hnodes_alloc(hmap->cap);
+    hmap->nodes = json_hnodes_alloc(json, hmap->cap);
 }
 
 // for rehash + put
-static void json_hmap_put_node(json_hmap_t *hmap, json_hnode_t *node) {
+static void json_hmap_put_node(
+	json_t *json, json_hmap_t *hmap, json_hnode_t *node
+) {
     size_t index = node->index;
 
     // find suitable bucket
@@ -497,9 +504,9 @@ static void json_hmap_put_node(json_hmap_t *hmap, json_hnode_t *node) {
     }
 
     // found empty bucket
-    hmap->nodes[index] = *node;
+    json_hmap_alloc_slot(json, hmap);
 
-    json_hmap_alloc_slot(hmap);
+    hmap->nodes[index] = *node;
 }
 
 static json_hnode_t *json_hmap_get_node(json_hmap_t *hmap, json_hash_t hash) {
@@ -516,16 +523,18 @@ static json_hnode_t *json_hmap_get_node(json_hmap_t *hmap, json_hash_t hash) {
 	return NULL;
 }
 
-static void json_hmap_put(json_hmap_t *hmap, char *key, json_object_t *object) {
+static void json_hmap_put(
+	json_t *json, json_hmap_t *hmap, char *key, json_object_t *object
+) {
 	json_hnode_t node;
 
-	json_vec_push(&hmap->vec, key);
+	json_vec_push(json, &hmap->vec, key);
 
 	node.object = object;
 	node.hash = json_hash_str(key);
 	node.index = node.hash % hmap->cap;
 
-	json_hmap_put_node(hmap, &node);
+	json_hmap_put_node(json, hmap, &node);
 }
 
 static json_object_t *json_hmap_get(json_hmap_t *hmap, char *key) {
@@ -534,7 +543,9 @@ static json_object_t *json_hmap_get(json_hmap_t *hmap, char *key) {
     return node ? node->object : NULL;
 }
 
-static json_object_t *json_hmap_del(json_hmap_t *hmap, char *key, bool order) {
+static json_object_t *json_hmap_del(
+	json_t *json, json_hmap_t *hmap, char *key, bool order
+) {
 	json_hash_t hash = json_hash_str(key);
     size_t index = hash % hmap->cap;
 
@@ -563,15 +574,15 @@ static json_object_t *json_hmap_del(json_hmap_t *hmap, char *key, bool order) {
 
     // last node in chain is now a duplicate
     hmap->nodes[last].hash = 0;
-    json_hmap_free_slot(hmap);
+    json_hmap_free_slot(json, hmap);
 
 	// remove key from vec
 	for (size_t i = 0; i < hmap->vec.size; ++i) {
 		if (!strcmp(key, (char *)hmap->vec.data[i])) {
 			if (order)
-				json_vec_del_ordered(&hmap->vec, i);
+				json_vec_del_ordered(json, &hmap->vec, i);
 			else
-				json_vec_del(&hmap->vec, i);
+				json_vec_del(json, &hmap->vec, i);
 
 			break;
 		}
@@ -835,7 +846,7 @@ static json_object_t *json_expect_array(
 	json_ctx_t *ctx, json_object_t *object
 ) {
 	json_vec_t *vec = (json_vec_t *)json_page_alloc(ctx->json, sizeof(*vec));
-	json_vec_make(vec, JSON_VEC_INIT_CAP);
+	json_vec_make(ctx->json, vec, JSON_VEC_INIT_CAP);
 
 	object->data.vec = vec;
 
@@ -852,7 +863,7 @@ static json_object_t *json_expect_array(
 		json_next_token(ctx);
 		json_expect_value(ctx, child);
 
-		json_vec_push(vec, child);
+		json_vec_push(ctx->json, vec, child);
 
 		// iterate
 		json_next_token(ctx);
@@ -873,7 +884,7 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
 		ctx->json,
 		sizeof(*hmap)
 	);
-	json_hmap_make(hmap, JSON_HMAP_INIT_CAP);
+	json_hmap_make(ctx->json, hmap, JSON_HMAP_INIT_CAP);
 
 	object->data.hmap = hmap;
 
@@ -895,7 +906,7 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
 		json_next_token(ctx);
 		json_expect_value(ctx, child);
 
-		json_hmap_put(hmap, key, child);
+		json_hmap_put(ctx->json, hmap, key, child);
 
 		// iterate
 		json_next_token(ctx);
@@ -1039,50 +1050,8 @@ void json_load_file(json_t *json, const char *filepath) {
     fclose(file);
 }
 
-static void json_free_object(json_object_t *);
-
-static void json_free_array(json_object_t *object) {
-	json_vec_t *vec = object->data.vec;
-
-	for (size_t i = 0; i < vec->size; ++i) {
-		json_object_t *child = (json_object_t *)vec->data[i];
-
-		if (child->type == JSON_ARRAY)
-			json_free_array(child);
-		else if (child->type == JSON_OBJECT)
-			json_free_object(child);
-	}
-
-	json_fat_free(vec->data);
-}
-
-static void json_free_object(json_object_t *object) {
-	json_hmap_t *hmap = object->data.hmap;
-
-	for (size_t i = 0; i < hmap->cap; ++i) {
-		json_hnode_t *node = &hmap->nodes[i];
-
-		if (node->hash) {
-			if (node->object->type == JSON_ARRAY)
-				json_free_array(node->object);
-			else if (node->object->type == JSON_OBJECT)
-				json_free_object(node->object);
-		}
-	}
-
-	json_fat_free(hmap->vec.data);
-	json_fat_free(hmap->nodes);
-}
-
 // recursively free object hashmap and array vectors
 void json_unload(json_t *json) {
-	if (json->root) {
-		if (json->root->type == JSON_OBJECT)
-			json_free_object(json->root);
-		else
-			json_free_array(json->root);
-	}
-
 	// free pages
 	for (size_t i = 0; i <= json->cur_page; ++i)
 		JSON_FREE(json->pages[i]);
@@ -1400,12 +1369,14 @@ bool json_to_bool(json_object_t *object) {
 	return object->type == JSON_TRUE;
 }
 
-json_object_t *json_pop(json_object_t *object, char *key) {
-	return json_hmap_del(object->data.hmap, key, false);
+json_object_t *json_pop(json_t *json, json_object_t *object, char *key) {
+	return json_hmap_del(json, object->data.hmap, key, false);
 }
 
-json_object_t *json_pop_ordered(json_object_t *object, char *key) {
-	return json_hmap_del(object->data.hmap, key, true);
+json_object_t *json_pop_ordered(
+	json_t *json, json_object_t *object, char *key
+) {
+	return json_hmap_del(json, object->data.hmap, key, true);
 }
 
 json_object_t *json_new_object(json_t *json) {
@@ -1417,7 +1388,7 @@ json_object_t *json_new_object(json_t *json) {
 		sizeof(*object->data.hmap)
 	);
 
-	json_hmap_make(object->data.hmap, JSON_HMAP_INIT_CAP);
+	json_hmap_make(json, object->data.hmap, JSON_HMAP_INIT_CAP);
 
 	return object;
 }
@@ -1433,10 +1404,10 @@ json_object_t *json_new_array(
 		sizeof(*object->data.vec)
 	);
 
-	json_vec_make(object->data.vec, size);
+	json_vec_make(json, object->data.vec, size);
 
 	for (size_t i = 0; i < size; ++i)
-		json_vec_push(object->data.vec, objects[i]);
+		json_vec_push(json, object->data.vec, objects[i]);
 
 	return object;
 }
@@ -1475,19 +1446,23 @@ json_object_t *json_new_null(json_t *json) {
 	return object;
 }
 
-void json_put(json_object_t *object, char *key, json_object_t *child) {
+void json_put(
+	json_t *json, json_object_t *object, char *key, json_object_t *child
+) {
 	JSON_ASSERT(
 		object->type == JSON_OBJECT,
 		"called put_object on a non-object.\n"
 	);
 
-	json_hmap_put(object->data.hmap, key, child);
+	json_hmap_put(json, object->data.hmap, key, child);
 }
 
-json_object_t *json_put_object(json_t *json, json_object_t *object, char *key) {
+json_object_t *json_put_object(
+	json_t *json, json_object_t *object, char *key
+) {
 	json_object_t *child = json_new_object(json);
 
-	json_put(object, key, child);
+	json_put(json, object, key, child);
 
 	return child;
 }
@@ -1496,27 +1471,27 @@ void json_put_array(
 	json_t *json, json_object_t *object, char *key,
 	json_object_t **objects, size_t size
 ) {
-	json_put(object, key, json_new_array(json, objects, size));
+	json_put(json, object, key, json_new_array(json, objects, size));
 }
 
 void json_put_string(
 	json_t *json, json_object_t *object, char *key, char *string
 ) {
-	json_put(object, key, json_new_string(json, string));
+	json_put(json, object, key, json_new_string(json, string));
 }
 
 void json_put_number(
 	json_t *json, json_object_t *object, char *key, double number
 ) {
-	json_put(object, key, json_new_number(json, number));
+	json_put(json, object, key, json_new_number(json, number));
 }
 
 void json_put_bool(json_t *json, json_object_t *object, char *key, bool value) {
-	json_put(object, key, json_new_bool(json, value));
+	json_put(json, object, key, json_new_bool(json, value));
 }
 
 void json_put_null(json_t *json, json_object_t *object, char *key) {
-	json_put(object, key, json_new_null(json));
+	json_put(json, object, key, json_new_null(json));
 }
 
 #endif // GHH_JSON_IMPL
