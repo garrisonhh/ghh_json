@@ -46,14 +46,19 @@ json_unload(&json);
 ```
 
 there are only 3 types you need to think about:
-- `json_t`, a reusable memory context for json objects
-  - access root element through `.root`.
 - `json_type_e`, json type enum
-- types are: `JSON_OBJECT, JSON_ARRAY, JSON_STRING, JSON_NUMBER, JSON_TRUE,
-  JSON_FALSE, JSON_NULL`
+  - types are: `JSON_OBJECT`, `JSON_ARRAY`, `JSON_STRING`, `JSON_NUMBER`,
+  `JSON_TRUE`, `JSON_FALSE`, `JSON_NULL`
 - `json_object_t`, a tagged union
   - access type through `.type`
-  - access data using `json_get` and `json_to` functions
+  - access and modify data using `json_get`, `json_put`, and `json_pop`
+  functions
+- `json_t`, a reusable memory context for json objects
+  - access root element through `.root`.
+  - when unloaded, all memory associated with it is freed - so you don't need
+  to explicitly manage individual `json_object_t *`s. unloading includes popped
+  objects, so if you create a new object on one `json_t` and then put it on
+  another, the object will be invalidated once its parent `json_t` is unloaded.
 
 ## api
 
@@ -72,7 +77,7 @@ there are only 3 types you need to think about:
 #define JSON_PAGE_SIZE
 ```
 
-### json_t lifetime
+### json\_t lifetime
 
 ```c
 // load json from a string
