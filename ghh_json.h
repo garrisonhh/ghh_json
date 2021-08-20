@@ -35,8 +35,10 @@ typedef struct json_object {
 typedef struct json {
 	json_object_t *root;
 
-	// page allocator
+	// allocators
+	void **tracked; // fat ptr
 	char **pages; // fat ptr
+	size_t cur_tracked, tracked_cap; // tracks tracked pointers
 	size_t cur_page, page_cap; // tracks allocator pages
 	size_t used; // tracks current page stack
 } json_t;
@@ -189,7 +191,14 @@ static void json_contextual_error(json_ctx_t *ctx) {
 #define JSON_PAGE_SIZE 65536
 #endif
 
+// initial sizes of stretchy buffers for json_t allocators
 #define JSON_INIT_PAGE_CAP 8
+#define JSON_INIT_TRACKED_CAP 256
+
+// tracked pointer header
+typedef struct json_tptr {
+	size_t size, index;
+} json_tptr_t;
 
 // fat functions use fat pointers to track memory allocation with JSON_MALLOC
 // and JSON_FREE. this is useful for allocating things that aren't on a json_t
@@ -206,16 +215,49 @@ static inline void json_fat_free(void *ptr) {
 	JSON_FREE((size_t *)ptr - 1);
 }
 
-static inline size_t json_fat_size(void *ptr) {
-	return *((size_t *)ptr - 1);
-}
-
 static void *json_fat_realloc(void *ptr, size_t size) {
 	void *new_ptr = json_fat_alloc(size);
 
 	if (ptr) {
-		memcpy(new_ptr, ptr, json_fat_size(ptr));
+		memcpy(new_ptr, ptr, *((size_t *)ptr - 1));
 		json_fat_free(ptr);
+	}
+
+	return new_ptr;
+}
+
+static void *json_tracked_alloc(json_t *json, size_t size) {
+	// allocate tracked pointer
+	json_tptr_t *ptr = (json_tptr_t *)JSON_MALLOC(sizeof(*ptr) + size);
+
+	ptr->size = size;
+	ptr->index = json->cur_tracked;
+
+	// push tracked pointer on tracked array
+	if (json->cur_tracked == json->tracked_cap) {
+		json->tracked_cap <<= 1;
+		json->tracked = json_fat_realloc(json->tracked, json->tracked_cap);
+	}
+
+	json->tracked[json->cur_tracked++] = ptr;
+
+	return ptr + 1;
+}
+
+static void json_tracked_free(json_t *json, void *ptr) {
+	size_t index = ((json_tptr_t *)ptr - 1)->index;
+	
+	JSON_FREE(json->tracked[index]);
+
+	json->tracked[index] = NULL;
+}
+
+static void *json_tracked_realloc(json_t *json, void *ptr, size_t size) {
+	void *new_ptr = json_tracked_alloc(json, size);
+
+	if (ptr) {
+		memcpy(new_ptr, ptr, ((json_tptr_t *)ptr - 1)->size);
+		json_tracked_free(json, ptr);
 	}
 
 	return new_ptr;
@@ -918,16 +960,26 @@ static void json_parse(json_t *json, const char *text) {
 // lifetime api ================================================================
 
 void json_load_empty(json_t *json) {
-	// no ZII in cpp :(
 	json->root = NULL;
 
+	// page allocator
 	json->cur_page = json->used = 0;
 	json->page_cap = JSON_INIT_PAGE_CAP;
 	json->pages = (char **)json_fat_alloc(
-		JSON_INIT_PAGE_CAP * sizeof(*json->pages)
+		json->page_cap * sizeof(*json->pages)
 	);
 
 	json->pages[0] = (char *)JSON_MALLOC(JSON_PAGE_SIZE);
+
+	// tracking allocator
+	json->cur_tracked = 0;
+	json->tracked_cap = JSON_INIT_TRACKED_CAP;
+	json->tracked = (void **)json_fat_alloc(
+		json->tracked_cap * sizeof(*json->tracked)
+	);
+
+	for (size_t i = 0; i < json->tracked_cap; ++i)
+		json->tracked[i] = NULL;
 }
 
 static void json_parse(json_t *json, const char *text);
@@ -1031,10 +1083,18 @@ void json_unload(json_t *json) {
 			json_free_array(json->root);
 	}
 
+	// free pages
 	for (size_t i = 0; i <= json->cur_page; ++i)
 		JSON_FREE(json->pages[i]);
 
 	json_fat_free(json->pages);
+
+	// free tracked
+	for (size_t i = 0; i <= json->cur_tracked; ++i)
+		if (json->tracked[i])
+			JSON_FREE(json->tracked[i]);
+
+	json_fat_free(json->tracked);
 }
 
 // serialization api ===========================================================
