@@ -685,7 +685,7 @@ static void json_expect_token(
     json_ctx_t *ctx, const char *token, size_t length
 ) {
     if (!json_token_equals(ctx, token, length))
-        JSON_CTX_ERROR(ctx, "unknown token, expected \"%s\"/\n", token);
+        JSON_CTX_ERROR(ctx, "unknown token, expected \"%s\".\n", token);
 
     ctx->index += length;
 }
@@ -891,6 +891,15 @@ static json_object_t *json_expect_array(
 
     ++ctx->index; // skip '['
 
+    // check for empty array
+    json_next_token(ctx);
+
+    if (ctx->text[ctx->index] == ']') {
+        ++ctx->index;
+
+        return object;
+    }
+
     // parse key/value pairs
     while (1) {
         // get child and store
@@ -899,7 +908,6 @@ static json_object_t *json_expect_array(
             sizeof(*child)
         );
 
-        json_next_token(ctx);
         json_expect_value(ctx, child);
 
         json_vec_push(ctx->json, vec, child);
@@ -913,6 +921,7 @@ static json_object_t *json_expect_array(
         }
 
         json_expect_token(ctx, ",", 1);
+        json_next_token(ctx);
     }
 
     return object;
@@ -929,6 +938,15 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
 
     ++ctx->index; // skip '{'
 
+    // check for empty object
+    json_next_token(ctx);
+
+    if (ctx->text[ctx->index] == '}') {
+        ++ctx->index;
+
+        return object;
+    }
+
     // parse key/value pairs
     while (1) {
         // get pair and store
@@ -937,7 +955,6 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
             sizeof(*object)
         );
 
-        json_next_token(ctx);
         char *key = json_expect_string(ctx);
 
         json_next_token(ctx);
@@ -956,6 +973,7 @@ static json_object_t *json_expect_obj(json_ctx_t *ctx, json_object_t *object) {
         }
 
         json_expect_token(ctx, ",", 1);
+        json_next_token(ctx);
     }
 
     return object;
