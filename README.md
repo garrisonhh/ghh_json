@@ -160,14 +160,14 @@ json_unload(&json);
 
 ```c
 // load json data into a struct
-const char json_data[] = \
-"[{\"name\": \"henry\", \"age\": 21},"\
+char *json_data =
+"[{\"name\": \"henry\", \"age\": 21},"
 " {\"name\": \"barb\", \"age\": 56}]";
 
 struct person { char *name; int age; } people[2];
 
 json_t json;
-json_load(&json, (char *)json_data);
+json_load(&json, json_data);
 
 // grab array of objects
 size_t length;
