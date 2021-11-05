@@ -786,11 +786,11 @@ static double json_expect_number(json_ctx_t *ctx) {
         if (!json_is_digit(ctx->text[ctx->index]))
             JSON_CTX_ERROR(ctx, "expected digit.\n");
 
-        double fract = 0.0;
+        double fract = 0.0, mult = 1.0;
 
         while (json_is_digit(ctx->text[ctx->index])) {
-            fract += ctx->text[ctx->index++] - '0';
-            fract *= 0.1;
+            fract += (double)(ctx->text[ctx->index++] - '0') * mult;
+            mult *= 0.1;
         }
 
         num += fract;
