@@ -486,7 +486,7 @@ static json_hnode_t *json_hnodes_alloc(json_t *json, size_t num_nodes) {
     return nodes;
 }
 
-static void json_hmap_put_node(json_t *, json_hmap_t *, json_hnode_t *);
+static bool json_hmap_put_node(json_t *, json_hmap_t *, json_hnode_t *);
 
 static void json_hmap_rehash(json_t *json, json_hmap_t *hmap, size_t new_cap) {
     json_hnode_t *old_nodes = hmap->nodes;
@@ -545,7 +545,8 @@ static json_hnode_t *json_hmap_get_node(json_hmap_t *hmap, json_hash_t hash) {
 }
 
 // for rehash + put
-static void json_hmap_put_node(
+// returns whether a previous node has been replaced
+static bool json_hmap_put_node(
     json_t *json, json_hmap_t *hmap, json_hnode_t *node
 ) {
     size_t index = node->index;
@@ -555,7 +556,7 @@ static void json_hmap_put_node(
         if (hmap->nodes[index].hash == node->hash) {
             // found matching bucket
             hmap->nodes[index].object = node->object;
-            return;
+            return true;
         }
 
         index = (index + 1) % hmap->cap;
@@ -565,6 +566,8 @@ static void json_hmap_put_node(
     // found empty bucket
     hmap->nodes[index] = *node;
     json_hmap_alloc_slot(json, hmap);
+
+    return false;
 }
 
 static void json_hmap_put(
@@ -572,13 +575,13 @@ static void json_hmap_put(
 ) {
     json_hnode_t node;
 
-    json_vec_push(json, &hmap->vec, key);
-
     node.object = object;
     node.hash = json_hash_str(key);
     node.index = node.hash % hmap->cap;
 
-    json_hmap_put_node(json, hmap, &node);
+    if (!json_hmap_put_node(json, hmap, &node))
+        json_vec_push(json, &hmap->vec, key);
+
 }
 
 static json_object_t *json_hmap_get(json_hmap_t *hmap, char *key) {
