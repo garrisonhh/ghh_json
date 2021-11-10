@@ -53,11 +53,16 @@ char *json_serialize(json_object_t *, bool mini, int indent, size_t *out_len);
 
 // take an object, retrieve data and cast
 json_object_t *json_get_object(json_object_t *, char *key);
-// returns actual, mutable array pointer
+// returns actual, mutable array pointer. do not modify.
 json_object_t **json_get_array(json_object_t *, char *key, size_t *out_size);
 char *json_get_string(json_object_t *, char *key);
 double json_get_number(json_object_t *, char *key);
 bool json_get_bool(json_object_t *, char *key);
+
+// returns actual, mutable array pointer. do not modify.
+// TODO make this more const?
+char **json_get_keys(json_object_t *, size_t *out_size);
+// TODO get_values and get_pairs somehow?
 
 // cast an object to a data type
 json_object_t **json_to_array(json_object_t *, size_t *out_size);
@@ -1393,6 +1398,15 @@ double json_get_number(json_object_t *object, char *key) {
 
 bool json_get_bool(json_object_t *object, char *key) {
     return json_to_bool(json_get_object(object, key));
+}
+
+char **json_get_keys(json_object_t *object, size_t *out_size) {
+    json_hmap_t *hmap = object->data.hmap;
+
+    if (out_size)
+        *out_size = hmap->vec.size;
+
+    return (char **)hmap->vec.data;
 }
 
 json_object_t **json_to_array(json_object_t *object, size_t *out_size) {
