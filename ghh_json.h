@@ -49,6 +49,7 @@ void json_load_file(json_t *, const char *filepath);
 void json_unload(json_t *);
 
 // returns a string allocated with JSON_MALLOC
+// TODO make this a lot easier
 char *json_serialize(json_object_t *, bool mini, int indent, size_t *out_len);
 
 // take an object, retrieve data and cast
@@ -60,9 +61,7 @@ double json_get_number(json_object_t *, char *key);
 bool json_get_bool(json_object_t *, char *key);
 
 // returns actual, mutable array pointer. do not modify.
-// TODO make this more const?
 char **json_get_keys(json_object_t *, size_t *out_size);
-// TODO get_values and get_pairs somehow?
 
 // cast an object to a data type
 json_object_t **json_to_array(json_object_t *, size_t *out_size);
@@ -77,6 +76,7 @@ json_object_t *json_pop_ordered(json_t *, json_object_t *, char *key);
 
 // add a json_object to another json_object
 void json_put(json_t *, json_object_t *, char *key, json_object_t *child);
+void json_put_copy(json_t *, json_object_t *, char *key, json_object_t *child);
 
 // equivalent to calling json_new_type() and then json_put().
 // return the new object
@@ -96,6 +96,9 @@ json_object_t *json_new_string(json_t *, char *string);
 json_object_t *json_new_number(json_t *, double number);
 json_object_t *json_new_bool(json_t *, bool value);
 json_object_t *json_new_null(json_t *);
+
+// allocate and recursively copy an object and its children
+json_object_t *json_copy(json_t *, json_object_t *);
 
 #ifdef GHH_JSON_IMPL
 
@@ -288,7 +291,7 @@ static void *json_tracked_realloc(json_t *json, void *ptr, size_t size) {
     new_tptr->size = size;
     new_tptr->index = old_tptr->index;
 
-    // copy data 
+    // copy data
     size_t copy_size = old_tptr->size > new_tptr->size
         ? new_tptr->size : old_tptr->size;
 
@@ -1492,7 +1495,12 @@ json_object_t *json_new_string(json_t *json, char *string) {
     json_object_t *object = json_empty_object(json);
 
     object->type = JSON_STRING;
-    object->data.string = string;
+    object->data.string = (char *)json_page_alloc(
+        json,
+        (strlen(string) + 1) * sizeof(*string)
+    );
+
+    strcpy(object->data.string, string);
 
     return object;
 }
@@ -1522,6 +1530,71 @@ json_object_t *json_new_null(json_t *json) {
     return object;
 }
 
+json_object_t *json_copy(json_t *json, json_object_t *object) {
+    json_object_t *copied = json_empty_object(json);
+
+    copied->type = object->type;
+
+    switch (copied->type) {
+    case JSON_OBJECT:
+        // init hmap
+        copied->data.hmap = (json_hmap_t *)json_page_alloc(
+            json,
+            sizeof(*copied->data.hmap)
+        );
+
+        json_hmap_make(json, copied->data.hmap, JSON_HMAP_INIT_CAP);
+
+        // copy data
+        size_t num_keys;
+        char **keys = json_get_keys(object, &num_keys);
+
+        for (size_t i = 0; i < num_keys; ++i) {
+            json_object_t *child = json_get_object(object, keys[i]);
+
+            json_put(json, copied, keys[i], json_copy(json, child));
+        }
+
+        break;
+    case JSON_ARRAY:
+        // init vec
+        copied->data.vec = (json_vec_t *)json_page_alloc(
+            json,
+            sizeof(*copied->data.vec)
+        );
+
+        // copy data
+        size_t size;
+        json_object_t **children = json_to_array(object, &size);
+
+        json_vec_make(json, copied->data.vec, size);
+
+        for (size_t i = 0; i < size; ++i)
+            json_vec_push(json, copied->data.vec, json_copy(json, children[i]));
+
+        break;
+    case JSON_STRING:;
+        // allocate new string and copy
+        char *string = object->data.string;
+
+        copied->data.string = (char *)json_page_alloc(
+            json,
+            // TODO store string lengths for objects?
+            (strlen(string) + 1) * sizeof(*string)
+        );
+
+        strcpy(copied->data.string, string);
+
+        break;
+    default:
+        copied->data = object->data;
+
+        break;
+    }
+
+    return copied;
+}
+
 void json_put(
     json_t *json, json_object_t *object, char *key, json_object_t *child
 ) {
@@ -1531,6 +1604,12 @@ void json_put(
     );
 
     json_hmap_put(json, object->data.hmap, key, child);
+}
+
+void json_put_copy(
+    json_t *json, json_object_t *object, char *key, json_object_t *child
+) {
+    json_put(json, object, key, json_copy(child));
 }
 
 json_object_t *json_put_object(
