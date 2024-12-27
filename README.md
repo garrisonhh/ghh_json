@@ -53,12 +53,15 @@ there are only 3 types you need to think about:
   - access type through `.type`
   - access and modify data using `json_get`, `json_put`, and `json_pop`
   functions
-- `json_t`, a reusable memory context for json objects
+- `json_t`, a reusable memory context for json objects which acts as an
+  arena/bump allocator
   - access root element through `.root`.
   - when unloaded, all memory associated with it is freed - so you don't need
-  to explicitly manage individual `json_object_t *`s. unloading includes popped
-  objects, so if you create a new object on one `json_t` and then put it on
-  another, the object will be invalidated once its parent `json_t` is unloaded.
+  to explicitly manage individual `json_object_t *`s.
+    - *when working with multiple `json_t` contexts, be aware that you can
+    create use-after-free bugs if you unload an object referenced by an object
+    on a different context. stay aware of your lifetimes, and use copy functions
+    when you need to!*
 
 ## api
 
