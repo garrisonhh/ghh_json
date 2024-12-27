@@ -1127,6 +1127,16 @@ void json_unload(json_t *json) {
 
 // serialization api ===========================================================
 
+// same as JSON_ESCAPE_CHARACTERS_X but without solidus ('/') as it is not required to be escaped
+#define JSON_SERIALIZE_ESCAPE_CHARACTERS_X\
+    X('"', '\"')\
+    X('\\', '\\')\
+    X('b', '\b')\
+    X('f', '\f')\
+    X('n', '\n')\
+    X('r', '\r')\
+    X('t', '\t')
+
 #ifndef JSON_SERIALIZER_BUF_SIZE
 #define JSON_SERIALIZER_BUF_SIZE 1024
 #endif
@@ -1189,7 +1199,7 @@ static void json_serialize_string(json_serializer_t *ser_ctx, char *str) {
             json_stringy_append(&ser_ctx->stringy, ser_ctx->buf, 2);\
             break;
 
-        JSON_ESCAPE_CHARACTERS_X
+        JSON_SERIALIZE_ESCAPE_CHARACTERS_X
 #undef X
         default:
             json_stringy_append(&ser_ctx->stringy, str, 1);\
