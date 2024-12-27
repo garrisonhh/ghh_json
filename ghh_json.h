@@ -283,7 +283,7 @@ static void *json_tracked_realloc(json_t *json, void *ptr, size_t size) {
     new_tptr->size = size;
     new_tptr->index = old_tptr->index;
 
-    // copy data 
+    // copy data
     size_t copy_size = old_tptr->size > new_tptr->size
         ? new_tptr->size : old_tptr->size;
 
@@ -762,21 +762,18 @@ static char *json_expect_string(json_ctx_t *ctx) {
 }
 
 static double json_expect_number(json_ctx_t *ctx) {
-    // minus symbol
-    bool negative = ctx->text[ctx->index] == '-';
+    size_t start_index = ctx->index;
 
-    if (negative)
+    // minus symbol
+    if (ctx->text[ctx->index] == '-')
         ++ctx->index;
 
     // integral component
-    double num = 0.0;
-
     if (!json_is_digit(ctx->text[ctx->index]))
         JSON_CTX_ERROR(ctx, "expected digit.\n");
 
     while (json_is_digit(ctx->text[ctx->index])) {
-        num *= 10.0;
-        num += ctx->text[ctx->index++] - '0';
+        ++ctx->index;
     }
 
     // fractional component
@@ -786,49 +783,33 @@ static double json_expect_number(json_ctx_t *ctx) {
         if (!json_is_digit(ctx->text[ctx->index]))
             JSON_CTX_ERROR(ctx, "expected digit.\n");
 
-        double fract = 0.0, mult = 1.0;
-
         while (json_is_digit(ctx->text[ctx->index])) {
-            fract += (double)(ctx->text[ctx->index++] - '0') * mult;
-            mult *= 0.1;
+            ++ctx->index;
         }
-
-        num += fract;
     }
-
-    if (negative)
-        num = -num;
 
     // exponential component
     if (ctx->text[ctx->index] == 'e' || ctx->text[ctx->index] == 'E') {
         ++ctx->index;
 
         // read exponent
-        bool neg_exp = false;
         if (ctx->text[ctx->index] == '+' || ctx->text[ctx->index] == '-')
-            neg_exp = ctx->text[ctx->index++] == '-';
+            ++ctx->index;
 
         if (!json_is_digit(ctx->text[ctx->index]))
             JSON_CTX_ERROR(ctx, "expected digit.\n");
 
-        long exponent = 0;
-
         while (json_is_digit(ctx->text[ctx->index])) {
-            exponent *= 10;
-            exponent += ctx->text[ctx->index++] - '0';
-        }
-
-        // calculate
-        if (neg_exp) {
-            while (exponent--)
-                num *= 0.1;
-        } else {
-            while (exponent--)
-                num *= 10.0;
+            ++ctx->index;
         }
     }
 
-    return num;
+    // number is valid json and accepted, can parse
+    char buf[128];
+    size_t length = ctx->index - start_index;
+    strncpy(buf, &ctx->text[start_index], length);
+
+    return atof(buf);
 }
 
 static json_object_t *json_expect_obj(json_ctx_t *, json_object_t *);
@@ -1180,10 +1161,8 @@ static void json_stringy_append(
         );
     }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstringop-truncation"
-    strncpy(stringy->str + stringy->pos, str, len);
-#pragma GCC diagnostic pop
+    // extra parens here suppress an unnecessary gcc warning
+    (strncpy(stringy->str + stringy->pos, str, len));
 
     stringy->pos += len;
 }
