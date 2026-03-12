@@ -309,6 +309,13 @@ static void *json_tracked_realloc(json_t *json, void *ptr, size_t size) {
 
 // allocates on a json_t page
 static void *json_page_alloc(json_t *json, size_t size) {
+    // ensure alignment
+    const size_t alignment = 8;
+    size_t align_diff = size % alignment;
+    if (align_diff > 0) {
+        size += alignment - align_diff;
+    }
+
     // allocate new page when needed
     if (json->used + size > JSON_PAGE_SIZE) {
         if (size >= JSON_PAGE_SIZE) {
@@ -1598,7 +1605,7 @@ void json_put(
 void json_put_copy(
     json_t *json, json_object_t *object, char *key, json_object_t *child
 ) {
-    json_put(json, object, key, json_copy(child));
+    json_put(json, object, key, json_copy(json, child));
 }
 
 json_object_t *json_put_object(
